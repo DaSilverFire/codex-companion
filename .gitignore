@@ -1,0 +1,49 @@
+.DS_Store
+._*
+
+# Swift and Xcode build products
+.build/
+.swiftpm/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+dist/
+artifacts/
+
+# Local evidence and generated pet work
+work/
+qa/
+output/
+generated/
+tmp/
+*.log
+*.trace
+*.memgraph
+
+# User, device, session, and app state
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+session_index.json
+task-history*.json
+device-identities.json
+local-settings.json
+
+# Secrets and signing material
+.env
+.env.*
+!.env.example
+*.p12
+*.cer
+*.key
+*.pem
+*.mobileprovision
+*.provisionprofile
+*.token
+*.api-key
+Local.xcconfig
+
+# Python test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/

@@ -1,0 +1,86 @@
+{
+  "atlas": {
+    "columns": 8,
+    "rows": 11
+  },
+  "cell": {
+    "height": 208,
+    "width": 192
+  },
+  "extensionStates": {
+    "talking": {
+      "frameCount": 8,
+      "runtimeInstallable": false
+    },
+    "thinking": {
+      "frameCount": 8,
+      "runtimeInstallable": false
+    }
+  },
+  "schemaVersion": 2,
+  "source": {
+    "app": "/Applications/ChatGPT.app",
+    "appBuild": "5263",
+    "appVersion": "26.707.71524",
+    "asset": "codex-spritesheet-v6-BRBFriCM.webp",
+    "assetHeight": 2288,
+    "assetWidth": 1536,
+    "inspectedAt": "2026-07-13",
+    "kind": "installed-chatgpt-renderer-snapshot"
+  },
+  "states": {
+    "failed": {
+      "frameCount": 8,
+      "row": 5,
+      "timingsMs": [140, 140, 140, 140, 140, 140, 140, 240]
+    },
+    "idle": {
+      "frameCount": 6,
+      "row": 0,
+      "timingsMs": [280, 110, 110, 140, 140, 320]
+    },
+    "jumping": {
+      "frameCount": 5,
+      "row": 4,
+      "timingsMs": [140, 140, 140, 140, 280]
+    },
+    "look-far": {
+      "frameCount": 8,
+      "row": 10
+    },
+    "look-near": {
+      "frameCount": 8,
+      "row": 9
+    },
+    "review": {
+      "frameCount": 6,
+      "row": 8,
+      "timingsMs": [150, 150, 150, 150, 150, 280]
+    },
+    "running": {
+      "frameCount": 6,
+      "row": 7,
+      "timingsMs": [120, 120, 120, 120, 120, 220]
+    },
+    "running-left": {
+      "frameCount": 8,
+      "row": 2,
+      "timingsMs": [120, 120, 120, 120, 120, 120, 120, 220]
+    },
+    "running-right": {
+      "frameCount": 8,
+      "row": 1,
+      "timingsMs": [120, 120, 120, 120, 120, 120, 120, 220]
+    },
+    "waiting": {
+      "frameCount": 6,
+      "row": 6,
+      "timingsMs": [150, 150, 150, 150, 150, 260]
+    },
+    "waving": {
+      "frameCount": 4,
+      "row": 3,
+      "timingsMs": [140, 140, 140, 280]
+    }
+  }
+}

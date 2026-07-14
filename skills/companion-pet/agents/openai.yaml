@@ -1,0 +1,4 @@
+interface:
+  display_name: "Companion Pet"
+  short_description: "Create and migrate schema-aware pet animations"
+  default_prompt: "Use $companion-pet to inspect the current pet schema, create or migrate Companion animations, and validate every frame."

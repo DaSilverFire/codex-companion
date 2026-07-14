@@ -1,0 +1,18 @@
+{
+  "name": "codex-companion",
+  "version": "0.3.0",
+  "description": "Companion tools and schema-aware animated pet workflows for Codex.",
+  "author": {
+    "name": "SilverFire"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Companion",
+    "shortDescription": "Install, repair, and extend Codex Companion.",
+    "longDescription": "Codex Companion provides update-safe sidecar management and schema-aware pet creation and migration tools without patching the signed ChatGPT app.",
+    "developerName": "SilverFire",
+    "category": "Productivity",
+    "capabilities": ["skills"],
+    "defaultPrompt": "Use Codex Companion to inspect or repair the sidecar and its animated pet packages."
+  }
+}
