@@ -1,13 +1,13 @@
 # Codex Companion
 
-Codex Companion is a native macOS app for keeping Codex tasks, approvals, usage, goals, and animated pets close at hand.
+Codex Companion expands the Codex pet experience into a native macOS desktop companion. Your animated pet stays close by while you follow tasks, reply or steer, handle approvals, and check usage and goals.
 
 ## Features
 
-- Follow active and recent Codex tasks from a compact desktop companion.
+- Keep an animated Codex pet on the desktop and let it react to task activity.
+- Follow active and recent Codex tasks from the pet's compact menu.
 - Reply, steer, and respond to approval requests.
 - Check Codex usage and goal progress.
-- Use animated pets that react to task activity.
 - Download updates from inside the app.
 
 ## Install on macOS
