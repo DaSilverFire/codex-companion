@@ -1,18 +1,18 @@
 {
   "name": "codex-companion",
-  "version": "0.3.0",
-  "description": "Companion tools and schema-aware animated pet workflows for Codex.",
+  "version": "0.3.1",
+  "description": "Companion tools and animated pet workflows for Codex.",
   "author": {
     "name": "SilverFire"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "Codex Companion",
-    "shortDescription": "Install, repair, and extend Codex Companion.",
+    "shortDescription": "Manage Codex Companion and animated pets.",
     "longDescription": "Codex Companion provides update-safe desktop companion management and tools for creating, validating, and updating animated pets.",
     "developerName": "SilverFire",
     "category": "Productivity",
     "capabilities": ["skills"],
-    "defaultPrompt": "Use Codex Companion to inspect or repair the sidecar and its animated pet packages."
+    "defaultPrompt": "Use Codex Companion to manage the app or create and update animated pets."
   }
 }

@@ -22,17 +22,9 @@ Replacing the app preserves existing Companion settings, pets, task history, and
 
 Until a Developer ID notarized release is available, macOS may require confirming the first launch in **System Settings > Privacy & Security**.
 
-## Mobile Support Coming Soon
-
-An iPhone companion is in active development. A public mobile release is coming soon.
-
 ## Companion Pet Skill
 
 The repository includes [`companion-pet`](skills/companion-pet/SKILL.md), a Codex skill for creating, validating, and updating animated pets for Codex Companion.
-
-## Privacy
-
-Release packages do not include local task history, device information, logs, API keys, or other personal data.
 
 ## Development
 
