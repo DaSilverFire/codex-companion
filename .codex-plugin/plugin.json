@@ -9,7 +9,7 @@
   "interface": {
     "displayName": "Codex Companion",
     "shortDescription": "Install, repair, and extend Codex Companion.",
-    "longDescription": "Codex Companion provides update-safe sidecar management and schema-aware pet creation and migration tools without patching the signed ChatGPT app.",
+    "longDescription": "Codex Companion provides update-safe desktop companion management and tools for creating, validating, and updating animated pets.",
     "developerName": "SilverFire",
     "category": "Productivity",
     "capabilities": ["skills"],

@@ -1,6 +1,14 @@
 # Codex Companion
 
-Codex Companion is a separate macOS companion for Codex tasks and animated pets. It does not patch or re-sign the ChatGPT app.
+Codex Companion is a native macOS app for keeping Codex tasks, approvals, usage, goals, and animated pets close at hand.
+
+## Features
+
+- Follow active and recent Codex tasks from a compact desktop companion.
+- Reply, steer, and respond to approval requests.
+- Check Codex usage and goal progress.
+- Use animated pets that react to task activity.
+- Download updates from inside the app.
 
 ## Install on macOS
 
@@ -10,24 +18,24 @@ Download `CodexCompanion-<version>-macOS-universal.dmg` from GitHub Releases. It
 2. Drag Codex Companion to Applications.
 3. Launch Codex Companion from Applications or Spotlight.
 
-Replacing the app preserves existing Companion settings, pet packages, task history, and Keychain credentials because those live outside the app bundle. After the first install, **Codex Companion > Settings > Updates** can check GitHub Releases, download the matching DMG and checksum, verify SHA-256 integrity, and open the installer.
+Replacing the app preserves existing Companion settings, pets, task history, and saved credentials. After the first install, use **Codex Companion > Settings > Updates** to check for future releases.
 
-Until a Developer ID notarized release is available, macOS may require confirming the first launch in **System Settings > Privacy & Security**. Release notes identify the exact signing and notarization status of each artifact.
+Until a Developer ID notarized release is available, macOS may require confirming the first launch in **System Settings > Privacy & Security**.
+
+## Mobile Support Coming Soon
+
+An iPhone companion is in active development. A public mobile release is coming soon.
 
 ## Companion Pet Skill
 
-The repository includes [`companion-pet`](skills/companion-pet/SKILL.md), a Codex skill for creating and migrating animated pet packages against the currently installed pet renderer schema.
-
-It does not assume a fixed 16-frame layout. It discovers atlas geometry and per-state frame counts, preserves the source pet during migration, and keeps unsupported states such as thinking and talking staged until the Companion runtime explicitly supports them.
+The repository includes [`companion-pet`](skills/companion-pet/SKILL.md), a Codex skill for creating, validating, and updating animated pets for Codex Companion.
 
 ## Privacy
 
-The repository and release packages do not contain local task history, device identifiers, logs, generated QA evidence, signing credentials, ChatGPT cookies, API keys, or Keychain data. User secrets stay in the macOS Keychain.
+Release packages do not include local task history, device information, logs, API keys, or other personal data.
 
 ## Development
 
-Source builds remain available for contributors, but end users should use the prebuilt installer. Release artifacts are produced from a clean checkout and validated for both architectures, bundle identity, signature integrity, checksum integrity, and machine-specific path leakage before publication.
+Source is available for contributors, but most users should install the prebuilt macOS release.
 
-Maintainers can build and publish a verified release with `scripts/publish-macos-release.sh VERSION`. The command refuses a dirty source tree, runs the release audit, rebuilds the universal DMG, verifies the mounted artifact, and uploads only the DMG and its checksum.
-
-The macOS bundle identifier is `com.silverfire.codexcompanion`.
+Maintainers can build and publish a verified release with `scripts/publish-macos-release.sh VERSION`.
