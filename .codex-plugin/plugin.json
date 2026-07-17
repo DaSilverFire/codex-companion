@@ -1,15 +1,15 @@
 {
   "name": "codex-companion",
-  "version": "0.3.1",
+  "version": "0.3.3",
   "description": "Companion tools and animated pet workflows for Codex.",
   "author": {
     "name": "SilverFire"
   },
-  "skills": "./skills/",
+  "skills": "./Skills/",
   "interface": {
     "displayName": "Codex Companion",
     "shortDescription": "Manage Codex Companion and animated pets.",
-    "longDescription": "Codex Companion provides update-safe desktop companion management and tools for creating, validating, and updating animated pets.",
+    "longDescription": "Codex Companion provides desktop companion management and tools for creating, validating, and updating animated pets.",
     "developerName": "SilverFire",
     "category": "Productivity",
     "capabilities": ["skills"],

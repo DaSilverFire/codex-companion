@@ -1,33 +1,37 @@
 # Codex Companion
 
-Codex Companion expands the Codex pet experience into a native macOS desktop companion. Your animated pet stays close by while you follow tasks, reply or steer, handle approvals, and check usage and goals.
+Codex Companion expands the Codex pet experience into a native macOS desktop companion. Your animated pet stays nearby while you follow tasks, reply or steer, handle approvals, and check usage and goals.
 
 ## Features
 
 - Keep an animated Codex pet on the desktop and let it react to task activity.
 - Follow active and recent Codex tasks from the pet's compact menu.
-- Reply, steer, and respond to approval requests.
-- Check Codex usage and goal progress.
-- Download updates from inside the app.
+- Reply, steer, and respond to approval requests through native Codex transport.
+- Check Codex usage, banked resets, and goal progress.
+- Pair approved Companion clients without exposing the Mac bridge to unknown devices.
 
 ## Install on macOS
 
-Download `CodexCompanion-<version>-macOS-universal.dmg` from GitHub Releases. It contains a prebuilt app for both Apple silicon and Intel Macs, so Xcode, Swift, Homebrew, and Terminal are not required.
+Download the universal macOS DMG from [GitHub Releases](https://github.com/DaSilverFire/codex-companion/releases). The prebuilt app supports Apple silicon and Intel Macs, so Xcode and Swift are not required.
 
-1. Open the downloaded `.dmg`.
-2. Drag Codex Companion to Applications.
+1. Open the downloaded DMG.
+2. Double-click `Install Codex Companion.command`.
 3. Launch Codex Companion from Applications or Spotlight.
 
-Replacing the app preserves existing Companion settings, pets, task history, and saved credentials. After the first install, use **Codex Companion > Settings > Updates** to check for future releases.
+The installer verifies the app, keeps a rollback copy while replacing an existing installation, preserves Companion settings, and installs the bundled pet skill.
 
-Until a Developer ID notarized release is available, macOS may require confirming the first launch in **System Settings > Privacy & Security**.
+Until a Developer ID notarized release is available, macOS may require confirming the download in **System Settings > Privacy & Security**. The installer also asks for confirmation before installing a pre-notarized build.
 
 ## Companion Pet Skill
 
-The repository includes [`companion-pet`](skills/companion-pet/SKILL.md), a Codex skill for creating, validating, and updating animated pets for Codex Companion.
+The repository includes [`companion-pet`](Skills/companion-pet/SKILL.md), a Codex skill for creating, validating, and updating animated pets for Codex Companion.
 
 ## Development
 
 Source is available for contributors, but most users should install the prebuilt macOS release.
 
-Maintainers can build and publish a verified release with `scripts/publish-macos-release.sh VERSION`.
+```bash
+./script/build_and_run.sh --verify
+```
+
+Release maintainers should follow [RELEASING.md](RELEASING.md).
