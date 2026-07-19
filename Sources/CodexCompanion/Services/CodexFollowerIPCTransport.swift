@@ -7,10 +7,27 @@ enum CodexFollowerIPCProtocol {
     static let maximumParsedFrameBytes = 4 * 1_024 * 1_024
     static let maximumWireFrameBytes = 256 * 1_024 * 1_024
 
+    static var socketURLs: [URL] {
+        socketURLs(
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
+            temporaryDirectory: FileManager.default.temporaryDirectory
+        )
+    }
+
     static var socketURL: URL {
-        FileManager.default.temporaryDirectory
+        socketURLs.first(where: { FileManager.default.fileExists(atPath: $0.path) })
+            ?? socketURLs[0]
+    }
+
+    static func socketURLs(homeDirectory: URL, temporaryDirectory: URL) -> [URL] {
+        let current = homeDirectory
+            .appendingPathComponent(".codex", isDirectory: true)
+            .appendingPathComponent("ipc", isDirectory: true)
+            .appendingPathComponent("ipc.sock")
+        let legacy = temporaryDirectory
             .appendingPathComponent("codex-ipc", isDirectory: true)
             .appendingPathComponent("ipc-\(getuid()).sock")
+        return [current, legacy]
     }
 
     static func frame(for message: [String: Any]) throws -> Data {
@@ -43,13 +60,20 @@ enum CodexFollowerIPCProtocol {
         prompt: String,
         action: CodexSendAction,
         clientMessageID: String,
-        cwd: String? = nil
+        cwd: String? = nil,
+        attachments: [CodexFollowerAttachment] = []
     ) -> [String: Any] {
-        let input: [[String: Any]] = [[
+        var input: [[String: Any]] = [[
             "type": "text",
             "text": prompt,
             "text_elements": [Any](),
         ]]
+        input.append(contentsOf: attachments.compactMap(\.inputItem))
+        let nativeAttachments = attachments.map(\.nativeAttachment)
+        let fileAttachments = attachments
+            .filter { $0.kind == .file }
+            .map(\.nativeAttachment)
+        let imageAttachments = attachments.compactMap(\.queuedImageAttachment)
 
         let method: String
         let params: [String: Any]
@@ -64,9 +88,9 @@ enum CodexFollowerIPCProtocol {
                 "context": [
                     "prompt": prompt,
                     "addedFiles": [Any](),
-                    "fileAttachments": [Any](),
+                    "fileAttachments": fileAttachments,
                     "ideContext": NSNull(),
-                    "imageAttachments": [Any](),
+                    "imageAttachments": imageAttachments,
                     "workspaceRoots": workspaceRoots,
                 ],
                 "createdAt": Int64(Date().timeIntervalSince1970 * 1_000),
@@ -79,7 +103,7 @@ enum CodexFollowerIPCProtocol {
                 "clientUserMessageId": clientMessageID,
                 "input": input,
                 "serviceTier": NSNull(),
-                "attachments": [Any](),
+                "attachments": nativeAttachments,
                 "restoreMessage": restoreMessage,
             ]
         case .reply:
@@ -89,6 +113,7 @@ enum CodexFollowerIPCProtocol {
                 "turnStartParams": [
                     "input": input,
                     "clientUserMessageId": clientMessageID,
+                    "attachments": nativeAttachments,
                 ],
             ]
         }
@@ -112,6 +137,7 @@ enum CodexFollowerIPCProtocol {
         clientMessageID: String,
         cwd: String?,
         existingState: [String: Any],
+        attachments: [CodexFollowerAttachment] = [],
         createdAtMilliseconds: Int64 = Int64(Date().timeIntervalSince1970 * 1_000)
     ) throws -> [String: Any] {
         for value in existingState.values where !(value is [[String: Any]]) {
@@ -120,15 +146,19 @@ enum CodexFollowerIPCProtocol {
 
         let trimmedCWD = cwd?.trimmingCharacters(in: .whitespacesAndNewlines)
         let workspaceRoots = trimmedCWD.flatMap { $0.isEmpty ? nil : $0 }.map { [$0] } ?? []
+        let fileAttachments = attachments
+            .filter { $0.kind == .file }
+            .map(\.nativeAttachment)
+        let imageAttachments = attachments.compactMap(\.queuedImageAttachment)
         var message: [String: Any] = [
             "id": clientMessageID,
             "text": prompt,
             "context": [
                 "prompt": prompt,
                 "addedFiles": [Any](),
-                "fileAttachments": [Any](),
+                "fileAttachments": fileAttachments,
                 "ideContext": NSNull(),
-                "imageAttachments": [Any](),
+                "imageAttachments": imageAttachments,
                 "workspaceRoots": workspaceRoots,
             ],
             "createdAt": createdAtMilliseconds,
@@ -153,6 +183,37 @@ enum CodexFollowerIPCProtocol {
             "params": [
                 "conversationId": threadID,
                 "state": state,
+            ],
+            "timeoutMs": routerTimeoutMilliseconds,
+        ]
+    }
+
+    static func threadSettingsRequest(
+        requestID: String,
+        clientID: String,
+        threadID: String,
+        model: String?,
+        reasoningEffort: String?
+    ) -> [String: Any] {
+        var threadSettings: [String: Any] = [:]
+        if let model = model?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !model.isEmpty {
+            threadSettings["model"] = model
+        }
+        if let reasoningEffort = reasoningEffort?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !reasoningEffort.isEmpty {
+            threadSettings["effort"] = reasoningEffort
+        }
+
+        return [
+            "type": "request",
+            "requestId": requestID,
+            "sourceClientId": clientID,
+            "version": 1,
+            "method": "thread-follower-update-thread-settings",
+            "params": [
+                "conversationId": threadID,
+                "threadSettings": threadSettings,
             ],
             "timeoutMs": routerTimeoutMilliseconds,
         ]
@@ -211,12 +272,40 @@ enum CodexFollowerIPCProtocol {
 }
 
 struct CodexFollowerIPCTransport {
+    func updateThreadSettings(
+        threadID: String,
+        model: String?,
+        reasoningEffort: String?
+    ) async -> CodexAppServerSendOutcome {
+        let result = await perform(
+            .threadSettings(
+                threadID: threadID,
+                model: model,
+                reasoningEffort: reasoningEffort
+            )
+        )
+
+        switch result {
+        case .success:
+            return .sent
+        case .connectionUnavailable:
+            return .sharedDaemonUnavailable
+        case .timedOut:
+            return .timedOut
+        case .error(let message):
+            return CodexFollowerIPCProtocol.outcome(forError: message)
+        case .failed:
+            return .failed
+        }
+    }
+
     func submit(
         prompt: String,
         threadID: String,
         action: CodexSendAction,
         clientMessageID: String,
-        cwd: String? = nil
+        cwd: String? = nil,
+        attachments: [CodexFollowerAttachment] = []
     ) async -> CodexAppServerSendOutcome {
         let result = await perform(
             .send(
@@ -224,7 +313,8 @@ struct CodexFollowerIPCTransport {
                 threadID: threadID,
                 action: action,
                 clientMessageID: clientMessageID,
-                cwd: cwd
+                cwd: cwd,
+                attachments: attachments
             )
         )
 
@@ -273,6 +363,7 @@ struct CodexFollowerIPCTransport {
         threadID: String,
         clientMessageID: String,
         cwd: String? = nil,
+        attachments: [CodexFollowerAttachment] = [],
         stateURL: URL = CodexQueuedFollowUpStateStore.defaultURL
     ) async -> CodexAppServerSendOutcome {
         let existingState: [String: Any]
@@ -289,7 +380,8 @@ struct CodexFollowerIPCTransport {
                 threadID: threadID,
                 clientMessageID: clientMessageID,
                 cwd: cwd,
-                existingState: existingState
+                existingState: existingState,
+                attachments: attachments
             )
         )
         switch result {
@@ -324,12 +416,18 @@ struct CodexFollowerIPCTransport {
 }
 
 private enum CodexFollowerIPCOperation {
+    case threadSettings(
+        threadID: String,
+        model: String?,
+        reasoningEffort: String?
+    )
     case send(
         prompt: String,
         threadID: String,
         action: CodexSendAction,
         clientMessageID: String,
-        cwd: String?
+        cwd: String?,
+        attachments: [CodexFollowerAttachment]
     )
     case approval(request: CodexPendingApproval, decision: CodexApprovalDecision)
 
@@ -338,12 +436,21 @@ private enum CodexFollowerIPCOperation {
         threadID: String,
         clientMessageID: String,
         cwd: String?,
-        existingState: [String: Any]
+        existingState: [String: Any],
+        attachments: [CodexFollowerAttachment]
     )
 
     func request(requestID: String, clientID: String) throws -> [String: Any] {
         switch self {
-        case let .send(prompt, threadID, action, clientMessageID, cwd):
+        case let .threadSettings(threadID, model, reasoningEffort):
+            return CodexFollowerIPCProtocol.threadSettingsRequest(
+                requestID: requestID,
+                clientID: clientID,
+                threadID: threadID,
+                model: model,
+                reasoningEffort: reasoningEffort
+            )
+        case let .send(prompt, threadID, action, clientMessageID, cwd, attachments):
             return CodexFollowerIPCProtocol.actionRequest(
                 requestID: requestID,
                 clientID: clientID,
@@ -351,7 +458,8 @@ private enum CodexFollowerIPCOperation {
                 prompt: prompt,
                 action: action,
                 clientMessageID: clientMessageID,
-                cwd: cwd
+                cwd: cwd,
+                attachments: attachments
             )
         case let .approval(request, decision):
             return CodexFollowerIPCProtocol.approvalRequest(
@@ -360,7 +468,7 @@ private enum CodexFollowerIPCOperation {
                 request: request,
                 decision: decision
             )
-        case let .queuedReply(prompt, threadID, clientMessageID, cwd, existingState):
+        case let .queuedReply(prompt, threadID, clientMessageID, cwd, existingState, attachments):
             return try CodexFollowerIPCProtocol.queuedReplyRequest(
                 requestID: requestID,
                 clientID: clientID,
@@ -368,7 +476,8 @@ private enum CodexFollowerIPCOperation {
                 prompt: prompt,
                 clientMessageID: clientMessageID,
                 cwd: cwd,
-                existingState: existingState
+                existingState: existingState,
+                attachments: attachments
             )
         }
     }
@@ -469,7 +578,19 @@ private final class CodexFollowerIPCSession: @unchecked Sendable {
     }
 
     private func connectSocket() throws -> Int32 {
-        let path = CodexFollowerIPCProtocol.socketURL.path
+        for socketURL in CodexFollowerIPCProtocol.socketURLs {
+            try checkCancellation()
+            do {
+                return try connectSocket(at: socketURL)
+            } catch CodexFollowerIPCError.connectionUnavailable {
+                continue
+            }
+        }
+        throw CodexFollowerIPCError.connectionUnavailable
+    }
+
+    private func connectSocket(at socketURL: URL) throws -> Int32 {
+        let path = socketURL.path
         let pathBytes = Array(path.utf8CString)
         var address = sockaddr_un()
         guard pathBytes.count <= MemoryLayout.size(ofValue: address.sun_path) else {

@@ -29,6 +29,82 @@ struct OnDeviceToolTests {
     }
 
     @Test
+    func attachmentContextIncludesReadableDocuments() throws {
+        let attachment = CompanionBridgeAttachment(
+            kind: .file,
+            filename: "notes.md",
+            mimeType: "text/markdown",
+            data: Data("Shadow should wave with one front paw.".utf8)
+        )
+
+        let context = try OnDeviceChatAttachmentContext.prepare(
+            prompt: "Summarize this file.",
+            attachments: [attachment]
+        )
+
+        #expect(context.prompt.contains("Summarize this file."))
+        #expect(context.prompt.contains("File: notes.md"))
+        #expect(context.prompt.contains("Shadow should wave with one front paw."))
+        #expect(context.images.isEmpty)
+    }
+
+    @Test
+    func attachmentOnlyImageGetsAUsefulPrompt() throws {
+        let attachment = CompanionBridgeAttachment(
+            kind: .image,
+            filename: "shadow.png",
+            mimeType: "image/png",
+            data: Data([0x89, 0x50, 0x4E, 0x47])
+        )
+
+        let context = try OnDeviceChatAttachmentContext.prepare(
+            prompt: "",
+            attachments: [attachment]
+        )
+
+        #expect(context.prompt.contains("Describe the attached content"))
+        #expect(context.prompt.contains("Attached images: shadow.png"))
+        #expect(context.images == [attachment])
+    }
+
+    @Test
+    func attachmentContextRejectsUnknownBinaryFiles() {
+        let attachment = CompanionBridgeAttachment(
+            kind: .file,
+            filename: "archive.bin",
+            mimeType: "application/octet-stream",
+            data: Data([0x00, 0xFF, 0x01])
+        )
+
+        #expect(throws: OnDeviceChatError.self) {
+            _ = try OnDeviceChatAttachmentContext.prepare(
+                prompt: "Inspect this.",
+                attachments: [attachment]
+            )
+        }
+    }
+
+    @Test
+    func attachmentContextMarksLaterDocumentsOmittedAfterTheTotalLimit() throws {
+        let documents = (1 ... 4).map { index in
+            CompanionBridgeAttachment(
+                kind: .file,
+                filename: "notes-\(index).txt",
+                mimeType: "text/plain",
+                data: Data(String(repeating: "x", count: 12_000).utf8)
+            )
+        }
+
+        let context = try OnDeviceChatAttachmentContext.prepare(
+            prompt: "Summarize these files.",
+            attachments: documents
+        )
+
+        #expect(context.prompt.contains("File: notes-4.txt"))
+        #expect(context.prompt.contains("document context limit was reached"))
+    }
+
+    @Test
     func weatherLookupBuildsDocumentedGeocodingRequest() throws {
         let service = CompanionWeatherService()
         let request = try service.makeGeocodingRequest(location: "Indianapolis, IN")

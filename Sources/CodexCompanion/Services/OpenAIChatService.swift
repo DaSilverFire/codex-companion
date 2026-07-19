@@ -1,6 +1,10 @@
 import Foundation
 
-struct OpenAIChatService {
+protocol OpenAIChatServing: Sendable {
+    func send(prompt: String, model: ChatGPTModel, apiKey: String) async throws -> OpenAIChatResult
+}
+
+struct OpenAIChatService: OpenAIChatServing {
     private let endpoint = URL(string: "https://api.openai.com/v1/responses")!
     private let maxOutputTokens = 700
 

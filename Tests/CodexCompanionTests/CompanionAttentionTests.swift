@@ -56,6 +56,33 @@ struct CompanionAttentionTests {
     }
 
     @Test
+    @MainActor
+    func repeatedUnchangedPetHoverStateDoesNotInvalidateTheModel() throws {
+        let suiteName = "CompanionAttentionTests-HoverInvalidation-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = CompanionAppModel(
+            petReactionCoordinator: PetReactionCoordinator(
+                generator: UnavailablePetReactionGenerator(),
+                defaults: defaults
+            ),
+            petVisibilityPreference: PetVisibilityPreference(defaults: defaults),
+            interactionPreferences: CompanionInteractionPreferences(defaults: defaults),
+            startsBackgroundServices: false
+        )
+        var invalidationCount = 0
+        let observation = model.objectWillChange.sink {
+            invalidationCount += 1
+        }
+
+        model.setPetHovering(false)
+        model.setPetHovering(false)
+
+        _ = observation
+        #expect(invalidationCount == 0)
+    }
+
+    @Test
     func transitionSelectorCoversAttentionGoalResponseCompletionAndFailure() throws {
         let running = Self.item(status: .running, message: "Working", goalStatus: nil, goalID: nil)
         let runningSnapshot = PetProcessSnapshot(item: running)

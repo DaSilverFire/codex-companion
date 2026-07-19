@@ -79,7 +79,8 @@ typealias CodexFollowerSubmitter = @Sendable (
     _ threadID: String,
     _ action: CodexSendAction,
     _ clientMessageID: String,
-    _ cwd: String?
+    _ cwd: String?,
+    _ attachments: [CodexFollowerAttachment]
 ) async -> CodexAppServerSendOutcome
 
 struct CodexQueuedReplyNotification: Sendable {
@@ -100,7 +101,8 @@ typealias CodexQueuedReplySubmitter = @Sendable (
     _ cwd: String?,
     _ expectedTurnID: String?,
     _ clientMessageID: String,
-    _ queuedNotification: CodexQueuedReplyNotification
+    _ queuedNotification: CodexQueuedReplyNotification,
+    _ attachments: [CodexFollowerAttachment]
 ) async -> CodexAppServerSendOutcome
 
 final class CodexAppServerSender {
@@ -108,22 +110,25 @@ final class CodexAppServerSender {
     private let queuedReplySubmitter: CodexQueuedReplySubmitter
 
     init(
-        submitter: @escaping CodexFollowerSubmitter = { prompt, threadID, action, clientMessageID, cwd in
+        submitter: @escaping CodexFollowerSubmitter = {
+            prompt, threadID, action, clientMessageID, cwd, attachments in
             await CodexFollowerIPCTransport().submit(
                 prompt: prompt,
                 threadID: threadID,
                 action: action,
                 clientMessageID: clientMessageID,
-                cwd: cwd
+                cwd: cwd,
+                attachments: attachments
             )
         },
         queuedReplySubmitter: @escaping CodexQueuedReplySubmitter = {
-            prompt, threadID, cwd, _, clientMessageID, queuedNotification in
+            prompt, threadID, cwd, _, clientMessageID, queuedNotification, attachments in
             let outcome = await CodexFollowerIPCTransport().queueReply(
                 prompt: prompt,
                 threadID: threadID,
                 clientMessageID: clientMessageID,
-                cwd: cwd
+                cwd: cwd,
+                attachments: attachments
             )
             if outcome == .sent {
                 queuedNotification()
@@ -142,7 +147,8 @@ final class CodexAppServerSender {
         action: CodexSendAction,
         expectedTurnID: String?,
         clientMessageID: String,
-        onQueued: @escaping @Sendable () -> Void
+        onQueued: @escaping @Sendable () -> Void,
+        attachments: [CodexFollowerAttachment] = []
     ) async -> CodexAppServerSendOutcome {
         let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedThreadID = threadID.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -157,7 +163,8 @@ final class CodexAppServerSender {
                 cwd,
                 expectedTurnID,
                 clientMessageID,
-                CodexQueuedReplyNotification(onQueued)
+                CodexQueuedReplyNotification(onQueued),
+                attachments
             )
             Self.log(
                 "queued-reply finished thread=\(trimmedThreadID) outcome=\(String(describing: outcome))"
@@ -172,7 +179,8 @@ final class CodexAppServerSender {
                 trimmedThreadID,
                 action,
                 clientMessageID,
-                cwd
+                cwd,
+                attachments
             )
             Self.log(
                 "native-ipc finished action=\(action.logName) thread=\(trimmedThreadID) outcome=\(String(describing: outcome))"

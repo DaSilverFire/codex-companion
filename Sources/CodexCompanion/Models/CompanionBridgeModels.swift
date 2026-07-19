@@ -29,6 +29,20 @@ enum CompanionBridgeSendAction: String, Codable, CaseIterable, Sendable {
     case steer
 }
 
+enum CompanionBridgeChatProvider: String, Codable, CaseIterable, Sendable {
+    case onDevice
+    case openAIAPI
+    case lumoAPI
+
+    var displayName: String {
+        switch self {
+        case .onDevice: "On-device"
+        case .openAIAPI: "OpenAI API"
+        case .lumoAPI: "Lumo API"
+        }
+    }
+}
+
 enum CompanionBridgeApprovalDecision: String, Codable, CaseIterable, Sendable {
     case approveOnce
     case approveSimilar
@@ -101,6 +115,33 @@ enum CompanionBridgeMediaKind: String, Codable, Sendable {
     case image
 }
 
+enum CompanionBridgeAttachmentKind: String, Codable, Sendable {
+    case file
+    case image
+}
+
+struct CompanionBridgeAttachment: Codable, Equatable, Identifiable, Sendable {
+    var id: UUID
+    var kind: CompanionBridgeAttachmentKind
+    var filename: String
+    var mimeType: String?
+    var data: Data
+
+    init(
+        id: UUID = UUID(),
+        kind: CompanionBridgeAttachmentKind,
+        filename: String,
+        mimeType: String? = nil,
+        data: Data
+    ) {
+        self.id = id
+        self.kind = kind
+        self.filename = filename
+        self.mimeType = mimeType
+        self.data = data
+    }
+}
+
 struct CompanionBridgeRequest: Codable, Equatable, Sendable {
     var id: UUID
     var protocolVersion: Int = CompanionBridgeProtocol.version
@@ -119,7 +160,10 @@ struct CompanionBridgeRequest: Codable, Equatable, Sendable {
     var skillName: String?
     var skillPath: String?
     var chatAgentID: String?
+    var chatProvider: CompanionBridgeChatProvider?
+    var chatModelID: String?
     var resetCreditID: String?
+    var attachments: [CompanionBridgeAttachment]?
     var idempotencyKey: UUID?
 
     init(
@@ -139,7 +183,10 @@ struct CompanionBridgeRequest: Codable, Equatable, Sendable {
         skillName: String? = nil,
         skillPath: String? = nil,
         chatAgentID: String? = nil,
+        chatProvider: CompanionBridgeChatProvider? = nil,
+        chatModelID: String? = nil,
         resetCreditID: String? = nil,
+        attachments: [CompanionBridgeAttachment]? = nil,
         idempotencyKey: UUID? = nil
     ) {
         self.id = id
@@ -158,7 +205,10 @@ struct CompanionBridgeRequest: Codable, Equatable, Sendable {
         self.skillName = skillName
         self.skillPath = skillPath
         self.chatAgentID = chatAgentID
+        self.chatProvider = chatProvider
+        self.chatModelID = chatModelID
         self.resetCreditID = resetCreditID
+        self.attachments = attachments
         self.idempotencyKey = idempotencyKey
     }
 
@@ -313,6 +363,7 @@ struct CompanionBridgeMessage: Codable, Equatable, Identifiable, Sendable {
     var role: CompanionBridgeMessageRole
     var text: String
     var createdAt: Date?
+    var attachments: [CompanionBridgeAttachment]? = nil
 }
 
 struct CompanionBridgeMedia: Codable, Equatable, Identifiable, Sendable {
@@ -352,6 +403,29 @@ struct CompanionBridgeCapabilities: Codable, Equatable, Sendable {
     var skills: [CompanionBridgeSkill]
     var plugins: [CompanionBridgePlugin]
     var chatAgents: [CompanionBridgeChatAgent]
+    var chatModels: [CompanionBridgeChatModel]? = nil
+}
+
+struct CompanionBridgeChatModel: Codable, Equatable, Identifiable, Sendable {
+    var id: String
+    var provider: CompanionBridgeChatProvider
+    var model: String
+    var displayName: String
+    var description: String
+    var isDefault: Bool
+    var isAvailable: Bool
+    var supportsAttachments: Bool
+
+    static let onDeviceDefault = CompanionBridgeChatModel(
+        id: "on-device",
+        provider: .onDevice,
+        model: "on-device",
+        displayName: "On-device",
+        description: "Apple Foundation Model on the connected Mac",
+        isDefault: true,
+        isAvailable: true,
+        supportsAttachments: true
+    )
 }
 
 struct CompanionBridgeModel: Codable, Equatable, Identifiable, Sendable {

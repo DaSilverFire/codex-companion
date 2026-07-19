@@ -25,6 +25,8 @@ RELEASE_SCRIPT = ROOT / "script" / "create_release.sh"
 RELEASE_INSTALLER = ROOT / "script" / "install_release.sh"
 PUBLIC_EXPORT_SCRIPT = ROOT / "script" / "export_public_source.sh"
 MANIFEST_SIGNER = ROOT / "script" / "sign_update_manifest.swift"
+UPDATE_SERVICE = ROOT / "Sources" / "CodexCompanion" / "Services" / "CompanionUpdateService.swift"
+SETTINGS_VIEW = ROOT / "Sources" / "CodexCompanion" / "Views" / "SettingsView.swift"
 RELEASING_GUIDE = ROOT / "RELEASING.md"
 README = ROOT / "README.md"
 BUNDLED_COMPANION_SKILL = ROOT / "Skills" / "companion-pet"
@@ -36,7 +38,7 @@ def plugin_fixture_is_available():
 
 
 def test_release_candidate_uses_one_non_colliding_version_source():
-    assert VERSION_FILE.read_text().strip() == "0.3.3"
+    assert VERSION_FILE.read_text().strip() == "0.3.4"
 
     build_source = BUILD_SCRIPT.read_text()
     release_source = RELEASE_SCRIPT.read_text()
@@ -62,7 +64,45 @@ def test_build_uses_silverfire_namespace_and_never_activates_shared_server():
     assert "CodexCompanionUpdatePublicKey" in source
     assert "CODEX_COMPANION_UPDATE_MANIFEST_URL" in source
     assert "CODEX_COMPANION_UPDATE_PUBLIC_KEY" in source
+    assert "https://github.com/DaSilverFire/codex-companion/releases/latest/download/update.json" in source
+    assert 'DEFAULT_UPDATE_PUBLIC_KEY="/b26MOV9HlKeifsp8TCIb3tPDJW5SGBf7o/CE+RooVg="' in source
     assert 'cp "$APP_ICON_SOURCE" "$APP_RESOURCES/$APP_ICON_NAME.icns"' in source
+    assert "/Applications/Xcode-beta.app/Contents/Developer" in source
+    assert "CODEX_COMPANION_BUILD_SCRATCH_PATH" in source
+    assert '--scratch-path "$SWIFT_BUILD_SCRATCH"' in source
+    assert 'XDG_CACHE_HOME="$SWIFT_BUILD_SCRATCH/cache"' in source
+    assert 'CLANG_MODULE_CACHE_PATH="$SWIFT_BUILD_SCRATCH/clang-module-cache"' in source
+    assert 'GIT_OPTIONAL_LOCKS="${GIT_OPTIONAL_LOCKS:-0}"' in source
+
+
+def test_builds_embed_only_an_explicit_secure_relay_endpoint():
+    for script in [BUILD_SCRIPT, RELEASE_SCRIPT]:
+        source = script.read_text()
+        assert 'RELAY_URL="${CODEX_COMPANION_RELAY_URL:-}"' in source
+        assert "CodexCompanionRelayURL" in source
+        assert "relay URL must use WSS" in source
+        assert "wss://" in source
+
+    release_guide = RELEASING_GUIDE.read_text()
+    assert 'CODEX_COMPANION_RELAY_URL="wss://' in release_guide
+    assert "Do not use a temporary preview URL for a release" in release_guide
+
+
+def test_mobile_beta_is_unavailable_in_public_builds_unless_explicitly_authorized():
+    for script in [BUILD_SCRIPT, RELEASE_SCRIPT]:
+        source = script.read_text()
+        assert 'MOBILE_BETA_AUTHORIZED="${CODEX_COMPANION_MOBILE_BETA_AUTHORIZED:-0}"' in source
+        assert "CODEX_COMPANION_MOBILE_BETA_AUTHORIZED must be 0 or 1" in source
+        assert "CodexCompanionMobileBetaAuthorized" in source
+        assert 'if [[ "$MOBILE_BETA_AUTHORIZED" == "1" ]]; then' in source
+        assert "NSBonjourServices" in source
+        assert "NSLocalNetworkUsageDescription" in source
+
+    runtime_source = (
+        ROOT / "Sources" / "CodexCompanion" / "Support" / "CompanionMobileRuntime.swift"
+    ).read_text()
+    assert "CodexCompanion.mobileBetaAccessGranted.v1" in runtime_source
+    assert "bundleAuthorization || defaults.bool" in runtime_source
 
 
 def test_shared_server_reconfiguration_assets_and_launch_cleanup_are_absent():
@@ -111,15 +151,17 @@ def test_release_builder_creates_universal_dmg_without_daemon_activation():
     assert "CodexCompanion.icns" in source
     assert "com.silverfire.codexcompanion" in source
     assert "copy_companion_skill()" in source
-    assert "write_installer_command()" in source
-    assert '"$DMG_STAGE/.install_release.sh"' in source
-    assert 'CODEX_COMPANION_ALLOW_ADHOC=1 exec' in source
-    assert "Install Codex Companion anyway?" in source
     assert "--exclude 'tests'" in source
     assert "--exclude '__pycache__'" in source
     assert "app-server daemon" not in source
     assert "configure_shared_app_server" not in source
     assert "CODEX_APP_SERVER_USE_LOCAL_DAEMON" not in source
+    assert "com.silverfire.codexcompanion.update-signing-key" in source
+    assert "security find-generic-password" in source
+    assert "https://github.com/DaSilverFire/codex-companion/releases/latest/download/update.json" in source
+    assert "CODEX_COMPANION_UPDATE_PRIVATE_KEY_BASE64" in source
+    assert "/Applications/Xcode-beta.app/Contents/Developer" in source
+    assert 'GIT_OPTIONAL_LOCKS="${GIT_OPTIONAL_LOCKS:-0}"' in source
 
 
 def test_release_installer_is_rollback_safe_and_installs_skill():
@@ -284,6 +326,30 @@ def test_release_contract_uses_signed_https_manifest():
     assert "canonicalPayload" in signer
 
 
+def test_verified_updater_hands_off_to_transactional_installer():
+    source = UPDATE_SERVICE.read_text()
+    settings = SETTINGS_VIEW.read_text()
+
+    assert "Install and Relaunch" in settings
+    assert "/usr/bin/shasum -a 256" in source
+    assert "/usr/bin/hdiutil attach -readonly -nobrowse" in source
+    assert "Install Codex Companion.command" in source
+    assert ".install_release.sh" in source
+    assert "CODEX_COMPANION_ALLOW_ADHOC=1" in source
+    assert "CODEX_COMPANION_INSTALL_RELAUNCH_AGENT" in source
+    assert "case installing(CompanionUpdateManifest)" in source
+
+
+def test_unsigned_release_wraps_transactional_installer_with_explicit_confirmation():
+    source = RELEASE_SCRIPT.read_text()
+
+    assert 'write_installer_command "$DMG_STAGE/Install Codex Companion.command"' in source
+    assert '"$DMG_STAGE/.install_release.sh"' in source
+    assert "This Codex Companion build is not notarized by Apple." in source
+    assert "Install Codex Companion anyway? [y/N]" in source
+    assert 'CODEX_COMPANION_ALLOW_ADHOC=1 exec "$SCRIPT_DIR/.install_release.sh"' in source
+
+
 def test_companion_pet_skill_is_bundled_without_generated_assets():
     assert (BUNDLED_COMPANION_SKILL / "SKILL.md").is_file()
     assert (BUNDLED_COMPANION_SKILL / "scripts" / "companion_pet_assets.py").is_file()
@@ -296,6 +362,7 @@ def test_companion_pet_skill_is_bundled_without_generated_assets():
 if __name__ == "__main__":
     test_release_candidate_uses_one_non_colliding_version_source()
     test_build_uses_silverfire_namespace_and_never_activates_shared_server()
+    test_mobile_beta_is_unavailable_in_public_builds_unless_explicitly_authorized()
     test_shared_server_reconfiguration_assets_and_launch_cleanup_are_absent()
     test_plugin_installer_uses_silverfire_namespace_without_daemon_activation()
     test_release_builder_creates_universal_dmg_without_daemon_activation()
@@ -306,5 +373,7 @@ if __name__ == "__main__":
     test_public_export_rejects_personal_namespace()
     test_public_readme_is_mac_product_copy_without_mobile_release_notes()
     test_release_contract_uses_signed_https_manifest()
+    test_verified_updater_hands_off_to_transactional_installer()
+    test_unsigned_release_wraps_transactional_installer_with_explicit_confirmation()
     test_companion_pet_skill_is_bundled_without_generated_assets()
     print("release packaging regression passed")

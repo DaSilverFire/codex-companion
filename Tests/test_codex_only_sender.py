@@ -74,7 +74,10 @@ def test_app_server_sender_uses_chatgpt_follower_ipc_without_a_second_app_server
     assert '"thread-follower-set-queued-follow-ups-state"' in ipc_source
     assert '"initializing-client"' in ipc_source
     assert '"codex-companion"' in ipc_source
+    assert 'appendingPathComponent(".codex"' in ipc_source
+    assert 'appendingPathComponent("ipc.sock")' in ipc_source
     assert 'appendingPathComponent("codex-ipc"' in ipc_source
+    assert "for socketURL in CodexFollowerIPCProtocol.socketURLs" in ipc_source
     assert "maximumParsedFrameBytes" in ipc_source
     assert "drain(byteCount:" in ipc_source
     assert "Restart ChatGPT" not in ipc_source

@@ -8,8 +8,9 @@ struct CodexAppServerSenderRetryTests {
     func unloadedTaskStopsAfterOneNativeAttemptWithoutChangingSelection() async {
         let attempts = CodexSendAttemptRecorder(outcomes: [.threadNotLoaded, .sent])
         let sender = CodexAppServerSender(
-            submitter: { prompt, threadID, action, clientMessageID, cwd in
-                await attempts.submit(
+            submitter: { prompt, threadID, action, clientMessageID, cwd, attachments in
+                _ = attachments
+                return await attempts.submit(
                     prompt: prompt,
                     threadID: threadID,
                     action: action,
@@ -39,8 +40,9 @@ struct CodexAppServerSenderRetryTests {
         let nativeAttempts = CodexSendAttemptRecorder(outcomes: [.failed])
         let queuedAttempts = CodexQueuedReplyAttemptRecorder(outcomes: [.sent])
         let sender = CodexAppServerSender(
-            submitter: { prompt, threadID, action, clientMessageID, cwd in
-                await nativeAttempts.submit(
+            submitter: { prompt, threadID, action, clientMessageID, cwd, attachments in
+                _ = attachments
+                return await nativeAttempts.submit(
                     prompt: prompt,
                     threadID: threadID,
                     action: action,
@@ -48,8 +50,9 @@ struct CodexAppServerSenderRetryTests {
                     cwd: cwd
                 )
             },
-            queuedReplySubmitter: { prompt, threadID, cwd, expectedTurnID, clientMessageID, queuedNotification in
-                await queuedAttempts.submit(
+            queuedReplySubmitter: { prompt, threadID, cwd, expectedTurnID, clientMessageID, queuedNotification, attachments in
+                _ = attachments
+                return await queuedAttempts.submit(
                     prompt: prompt,
                     threadID: threadID,
                     cwd: cwd,

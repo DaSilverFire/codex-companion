@@ -230,14 +230,16 @@ struct CodexMobileTaskArchiveTests {
         let page = try CodexMobileTaskArchive(homeDirectory: fixture.root)
             .timeline(threadID: "thread-live", cursor: nil, limit: 20)
 
-        #expect(page.items.map(\.kind) == [.reasoning, .message, .compaction])
+        #expect(page.items.map(\.kind) == [.reasoning, .tool, .message, .compaction])
         #expect(page.items[0].title == "Read files")
         #expect(page.items[0].status == .completed)
-        #expect(page.items[0].detail?.contains("Ran a command") == true)
-        #expect(page.items[0].detail?.contains("swift test --filter CodexMobileTaskArchiveTests") == true)
-        #expect(page.items[1].text == "The focused archive test is running now.")
-        #expect(page.items[1].phase == .commentary)
-        #expect(page.items[2].title == "Context compacted")
+        #expect(page.items[0].detail == nil)
+        #expect(page.items[1].title == "Tested the app")
+        #expect(page.items[1].status == .inProgress)
+        #expect(page.items[1].detail?.contains("swift test --filter CodexMobileTaskArchiveTests") == true)
+        #expect(page.items[2].text == "The focused archive test is running now.")
+        #expect(page.items[2].phase == .commentary)
+        #expect(page.items[3].title == "Context compacted")
         #expect(page.revision.isEmpty == false)
     }
 
@@ -312,11 +314,17 @@ struct CodexMobileTaskArchiveTests {
         let page = try CodexMobileTaskArchive(homeDirectory: fixture.root)
             .timeline(threadID: "thread-semantic", cursor: nil, limit: 20)
 
-        #expect(page.items.map(\.id) == ["reason-planning", "delegate-call", "reason-designing"])
+        #expect(page.items.map(\.id) == [
+            "reason-planning",
+            "delegate-call",
+            "reason-designing",
+            "command-call",
+        ])
         #expect(page.items.map(\.title) == [
             "Planning release scripts development",
             "Messaged an agent",
             "Designing deterministic release audit script",
+            "Tested the app",
         ])
         #expect(page.items[0].status == .completed)
         #expect(page.items[1].detail?.contains("Target: Turing") == true)
@@ -324,11 +332,48 @@ struct CodexMobileTaskArchiveTests {
         #expect(page.items[1].detail?.contains("Also verify the deterministic audit output") == true)
         #expect(page.items[1].detail?.contains("timed_out") == false)
         #expect(page.items[2].status == .inProgress)
-        let activityDetail = try #require(page.items[2].detail)
+        #expect(page.items[2].detail == nil)
+        #expect(page.items[3].status == .completed)
+        let activityDetail = try #require(page.items[3].detail)
         let commandRange = try #require(activityDetail.range(of: "swift test --filter ReleaseAuditTests"))
         let resultRange = try #require(activityDetail.range(of: "3 release audit tests passed"))
         #expect(commandRange.lowerBound < resultRange.lowerBound)
         #expect(!page.items.contains(where: { $0.title == "Wait" || $0.title == "Tool result" }))
+    }
+
+    @Test
+    func timelineRecoversEditedFilePathsFromPairedToolOutput() throws {
+        let fixture = try ArchiveFixture()
+        defer { fixture.remove() }
+
+        try fixture.writeRollout([
+            fixture.toolCallLine(
+                id: "patch-call",
+                callID: "call-patch",
+                name: "apply_patch",
+                input: "opaque patch payload",
+                turnID: "turn-patch"
+            ),
+            fixture.functionOutputLine(
+                callID: "call-patch",
+                output: """
+                Success. Updated the following files:
+                M Sources/App.swift
+                A Sources/Timeline View.swift
+                """,
+                turnID: "turn-patch"
+            ),
+        ])
+        try fixture.insertThread(id: "thread-patch", title: "Patch timeline")
+
+        let page = try CodexMobileTaskArchive(homeDirectory: fixture.root)
+            .timeline(threadID: "thread-patch", cursor: nil, limit: 20)
+
+        #expect(page.items.count == 1)
+        #expect(page.items[0].title == "Edited files")
+        #expect(page.items[0].detail == "Sources/App.swift\nSources/Timeline View.swift")
+        #expect(page.items[0].detail?.contains("Success.") == false)
+        #expect(page.items[0].detail?.contains("Result") == false)
     }
 
     @Test
@@ -448,7 +493,7 @@ struct CodexMobileTaskArchiveTests {
 
         #expect(page.items.count == 1)
         #expect(item.id == "failed-command")
-        #expect(item.title == "Ran a command")
+        #expect(item.title == "Tested the app")
         #expect(item.status == .failed)
         #expect(item.detail?.contains("swift test --filter MissingTests") == true)
         #expect(item.detail?.contains("Error: no tests matched MissingTests") == true)
@@ -467,15 +512,125 @@ struct CodexMobileTaskArchiveTests {
                 input: #"{"code":"nodeRepl.write('ready')"}"#,
                 turnID: "turn-javascript"
             ),
+            fixture.toolCallLine(
+                id: "tool-search-call",
+                callID: "call-tool-search",
+                name: "tool_search",
+                input: #"{"query":"calendar tools"}"#,
+                turnID: "turn-javascript"
+            ),
+            fixture.toolCallLine(
+                id: "integration-call",
+                callID: "call-integration",
+                name: "mcp__calendar__list_events",
+                input: #"{"range":"today"}"#,
+                turnID: "turn-javascript"
+            ),
         ])
         try fixture.insertThread(id: "thread-qualified-tool", title: "Qualified tool")
 
         let page = try CodexMobileTaskArchive(homeDirectory: fixture.root)
             .timeline(threadID: "thread-qualified-tool", cursor: nil, limit: 20)
+        let itemsByID = Dictionary(uniqueKeysWithValues: page.items.map { ($0.id, $0) })
+        let computerUse = try #require(itemsByID["javascript-call"])
+        let toolSearch = try #require(itemsByID["tool-search-call"])
+        let integration = try #require(itemsByID["integration-call"])
+
+        #expect(computerUse.title == "Inspected an app")
+        #expect(computerUse.detail == nil)
+        #expect(toolSearch.title == "Loaded tools")
+        #expect(integration.title == "Used an integration")
+    }
+
+    @Test
+    func timelineHidesToolInventoryJavaScriptBehindLoadedTools() throws {
+        let fixture = try ArchiveFixture()
+        defer { fixture.remove() }
+
+        try fixture.writeRollout([
+            fixture.toolCallLine(
+                id: "tool-inventory-call",
+                callID: "call-tool-inventory",
+                name: "exec",
+                input: """
+                const matches = ALL_TOOLS.filter(({ name, description }) =>
+                    name.includes("device") || description.includes("screenshot")
+                );
+                text(matches);
+                // Warning: truncated output
+                // exec tool declaration
+                """,
+                turnID: "turn-tool-inventory"
+            ),
+        ])
+        try fixture.insertThread(id: "thread-tool-inventory", title: "Tool inventory")
+
+        let page = try CodexMobileTaskArchive(homeDirectory: fixture.root)
+            .timeline(threadID: "thread-tool-inventory", cursor: nil, limit: 20)
         let item = try #require(page.items.first)
 
-        #expect(item.title == "Ran JavaScript")
-        #expect(item.detail?.contains("nodeRepl.write('ready')") == true)
+        #expect(page.items.count == 1)
+        #expect(item.title == "Loaded tools")
+        #expect(item.detail == nil)
+        #expect(item.text == nil)
+    }
+
+    @Test
+    func timelineHidesDirectNodeInventoryBehindLoadedTools() throws {
+        let fixture = try ArchiveFixture()
+        defer { fixture.remove() }
+
+        try fixture.writeRollout([
+            fixture.toolCallLine(
+                id: "direct-tool-inventory-call",
+                callID: "call-direct-tool-inventory",
+                name: "mcp__node_repl__js",
+                input: #"{"code":"const hits = ALL_TOOLS.filter(tool => tool.name.includes('thread')); text(hits);"}"#,
+                turnID: "turn-direct-tool-inventory"
+            ),
+        ])
+        try fixture.insertThread(id: "thread-direct-tool-inventory", title: "Direct tool inventory")
+
+        let page = try CodexMobileTaskArchive(homeDirectory: fixture.root)
+            .timeline(threadID: "thread-direct-tool-inventory", cursor: nil, limit: 20)
+        let item = try #require(page.items.first)
+
+        #expect(page.items.count == 1)
+        #expect(item.title == "Loaded tools")
+        #expect(item.detail == nil)
+        #expect(item.text == nil)
+    }
+
+    @Test
+    func timelineHidesServerQualifiedNodeInventoryBehindLoadedTools() throws {
+        let fixture = try ArchiveFixture()
+        defer { fixture.remove() }
+
+        try fixture.writeRollout([
+            fixture.mcpToolCallEndLine(
+                id: "server-tool-inventory-call",
+                callID: "call-server-tool-inventory",
+                server: "node_repl",
+                tool: "js",
+                arguments: [
+                    "code": "const hits = ALL_TOOLS.filter(tool => tool.name.includes('thread')); text(hits);",
+                ],
+                turnID: "turn-server-tool-inventory"
+            ),
+        ])
+        try fixture.insertThread(
+            id: "thread-server-tool-inventory",
+            title: "Server tool inventory"
+        )
+
+        let page = try CodexMobileTaskArchive(homeDirectory: fixture.root)
+            .timeline(threadID: "thread-server-tool-inventory", cursor: nil, limit: 20)
+        let item = try #require(page.items.first)
+
+        #expect(page.items.count == 1)
+        #expect(item.title == "Loaded tools")
+        #expect(item.detail == nil)
+        #expect(item.text == nil)
     }
 
     @Test
@@ -514,11 +669,18 @@ struct CodexMobileTaskArchiveTests {
             cursor: olderCursor,
             limit: 2
         )
+        let oldestCursor = try #require(older.nextCursor)
+        let oldest = try archive.timeline(
+            threadID: "thread-semantic-pages",
+            cursor: oldestCursor,
+            limit: 2
+        )
 
-        #expect(newest.items.map(\.id) == ["activity-2", "activity-3"])
-        #expect(older.items.map(\.id) == ["activity-1"])
-        #expect(older.nextCursor == nil)
-        #expect(Set((older.items + newest.items).map(\.id)).count == 3)
+        #expect(newest.items.map(\.id) == ["activity-3", "command-3"])
+        #expect(older.items.map(\.id) == ["activity-2", "command-2"])
+        #expect(oldest.items.map(\.id) == ["activity-1", "command-1"])
+        #expect(oldest.nextCursor == nil)
+        #expect(Set((oldest.items + older.items + newest.items).map(\.id)).count == 6)
     }
 
     @Test
@@ -655,6 +817,7 @@ struct CodexMobileTaskArchiveTests {
         let fixture = try ArchiveFixture()
         defer { fixture.remove() }
         try fixture.writeRollout([
+            fixture.taskStartedLine(turnID: "turn-a"),
             fixture.messageLine(id: "user-1", role: "user", text: "Initial request", turnID: "turn-a"),
             fixture.messageLine(id: "assistant-1", role: "assistant", text: "Latest Codex update", turnID: "turn-a"),
         ])
@@ -671,8 +834,63 @@ struct CodexMobileTaskArchiveTests {
         #expect(task.id == "thread-title")
         #expect(task.title == "Mobile Companion work")
         #expect(task.preview == "Latest Codex update")
+        #expect(task.status == .running)
         #expect(task.activeTurnID == "turn-a")
         #expect(page.nextCursor == nil)
+    }
+
+    @Test
+    func taskPageUsesCompletedTurnLifecycleWithoutWaitingForTheRecencyHeuristic() throws {
+        let fixture = try ArchiveFixture()
+        defer { fixture.remove() }
+        try fixture.writeRollout([
+            fixture.taskStartedLine(turnID: "turn-complete"),
+            fixture.messageLine(
+                id: "assistant-complete",
+                role: "assistant",
+                text: "The response is finished.",
+                turnID: "turn-complete",
+                phase: "final"
+            ),
+            fixture.taskLifecycleLine(type: "task_complete", turnID: "turn-complete"),
+        ])
+        try fixture.insertThread(id: "thread-complete", title: "Completed response")
+
+        let task = try #require(
+            CodexMobileTaskArchive(homeDirectory: fixture.root)
+                .tasks(cursor: nil, limit: 20)
+                .tasks.first
+        )
+
+        #expect(task.status == .completed)
+        #expect(task.activeTurnID == nil)
+        #expect(task.preview == "The response is finished.")
+    }
+
+    @Test
+    func taskPageExposesFailedTurnLifecycleForMobileAlerts() throws {
+        let fixture = try ArchiveFixture()
+        defer { fixture.remove() }
+        try fixture.writeRollout([
+            fixture.taskStartedLine(turnID: "turn-failed"),
+            fixture.messageLine(
+                id: "assistant-before-failure",
+                role: "assistant",
+                text: "The command failed.",
+                turnID: "turn-failed"
+            ),
+            fixture.taskLifecycleLine(type: "task_aborted", turnID: "turn-failed"),
+        ])
+        try fixture.insertThread(id: "thread-failed", title: "Failed response")
+
+        let task = try #require(
+            CodexMobileTaskArchive(homeDirectory: fixture.root)
+                .tasks(cursor: nil, limit: 20)
+                .tasks.first
+        )
+
+        #expect(task.status == .failed)
+        #expect(task.activeTurnID == nil)
     }
 
     @Test
@@ -978,11 +1196,15 @@ private struct ArchiveFixture {
     }
 
     func taskStartedLine(turnID: String) -> String {
+        taskLifecycleLine(type: "task_started", turnID: turnID)
+    }
+
+    func taskLifecycleLine(type: String, turnID: String) -> String {
         jsonLine([
             "timestamp": "2026-07-13T02:59:59.000Z",
             "type": "event_msg",
             "payload": [
-                "type": "task_started",
+                "type": type,
                 "turn_id": turnID,
             ],
         ])
@@ -1105,6 +1327,31 @@ private struct ArchiveFixture {
             "payload": [
                 "type": "context_compacted",
                 "turn_id": turnID,
+            ],
+        ])
+    }
+
+    func mcpToolCallEndLine(
+        id: String,
+        callID: String,
+        server: String,
+        tool: String,
+        arguments: [String: Any],
+        turnID: String
+    ) -> String {
+        jsonLine([
+            "timestamp": "2026-07-13T03:00:02.000Z",
+            "type": "event_msg",
+            "payload": [
+                "id": id,
+                "type": "mcp_tool_call_end",
+                "call_id": callID,
+                "turn_id": turnID,
+                "invocation": [
+                    "server": server,
+                    "tool": tool,
+                    "arguments": arguments,
+                ],
             ],
         ])
     }

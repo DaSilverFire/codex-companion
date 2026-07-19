@@ -51,21 +51,17 @@ struct CodexCompanionApp: App {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var mobileBridgeServer: CodexCompanionMobileBridgeServer?
-    private let powerAvailabilityCoordinator = CompanionPowerAvailabilityCoordinator()
+    private let mobileRuntime = CompanionMobileRuntimeController.shared
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         NSApp.activate(ignoringOtherApps: true)
-        powerAvailabilityCoordinator.start()
-        let bridge = CodexCompanionMobileBridgeServer()
-        mobileBridgeServer = bridge
-        bridge.start()
+        mobileRuntime.startIfEnabled()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        powerAvailabilityCoordinator.stop()
-        mobileBridgeServer?.stop()
+        mobileRuntime.shutdown()
     }
 }

@@ -1,14 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ -z "${DEVELOPER_DIR:-}" ]]; then
+  if [[ -d /Applications/Xcode-beta.app/Contents/Developer ]]; then
+    export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer
+  elif [[ -d /Applications/Xcode.app/Contents/Developer ]]; then
+    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+  fi
+fi
+
 MODE="${1:-run}"
 APP_NAME="CodexCompanion"
 BUNDLE_NAME="Codex Companion"
 BUNDLE_ID="com.silverfire.codexcompanion"
 MIN_SYSTEM_VERSION="14.0"
 DEFAULT_SIGN_IDENTITY="Codex Companion Trusted Local Code Signing"
-UPDATE_MANIFEST_URL="${CODEX_COMPANION_UPDATE_MANIFEST_URL:-}"
-UPDATE_PUBLIC_KEY="${CODEX_COMPANION_UPDATE_PUBLIC_KEY:-}"
+DEFAULT_UPDATE_MANIFEST_URL="https://github.com/DaSilverFire/codex-companion/releases/latest/download/update.json"
+DEFAULT_UPDATE_PUBLIC_KEY="/b26MOV9HlKeifsp8TCIb3tPDJW5SGBf7o/CE+RooVg="
+UPDATE_MANIFEST_URL="${CODEX_COMPANION_UPDATE_MANIFEST_URL:-$DEFAULT_UPDATE_MANIFEST_URL}"
+UPDATE_PUBLIC_KEY="${CODEX_COMPANION_UPDATE_PUBLIC_KEY:-$DEFAULT_UPDATE_PUBLIC_KEY}"
+RELAY_URL="${CODEX_COMPANION_RELAY_URL:-}"
+MOBILE_BETA_AUTHORIZED="${CODEX_COMPANION_MOBILE_BETA_AUTHORIZED:-0}"
+MOBILE_BETA_PLIST_BOOL=false
 RELAUNCH_LABEL="com.silverfire.codexcompanion.relauncher"
 USER_DOMAIN="gui/$(id -u)"
 RELAUNCH_PLIST="$HOME/Library/LaunchAgents/$RELAUNCH_LABEL.plist"
@@ -20,6 +33,7 @@ VERSION_FILE="$ROOT_DIR/VERSION"
 VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
 DIST_DIR="$ROOT_DIR/dist"
 STAGING_DIR="${TMPDIR:-/tmp}/codex-companion-build"
+SWIFT_BUILD_SCRATCH="${CODEX_COMPANION_BUILD_SCRATCH_PATH:-${TMPDIR:-/tmp}/codex-companion-swift-build}"
 APP_BUNDLE="$STAGING_DIR/$BUNDLE_NAME.app"
 DIST_APP_BUNDLE="$DIST_DIR/$BUNDLE_NAME.app"
 INSTALLED_APP_BUNDLE="/Applications/$BUNDLE_NAME.app"
@@ -31,9 +45,10 @@ APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_ICON_SOURCE="$ROOT_DIR/Assets/AppIcon/CodexCompanion.icns"
 APP_ICON_NAME="CodexCompanion"
 
-export XDG_CACHE_HOME="$ROOT_DIR/.build/cache"
-export CLANG_MODULE_CACHE_PATH="$ROOT_DIR/.build/clang-module-cache"
-mkdir -p "$XDG_CACHE_HOME" "$CLANG_MODULE_CACHE_PATH"
+export XDG_CACHE_HOME="$SWIFT_BUILD_SCRATCH/cache"
+export CLANG_MODULE_CACHE_PATH="$SWIFT_BUILD_SCRATCH/clang-module-cache"
+export GIT_OPTIONAL_LOCKS="${GIT_OPTIONAL_LOCKS:-0}"
+mkdir -p "$SWIFT_BUILD_SCRATCH" "$XDG_CACHE_HOME" "$CLANG_MODULE_CACHE_PATH"
 
 running_app_pids() {
   pgrep -f "$INSTALLED_APP_BUNDLE/Contents/MacOS/$APP_NAME" || true
@@ -97,11 +112,23 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+if [[ "$MOBILE_BETA_AUTHORIZED" != "0" && "$MOBILE_BETA_AUTHORIZED" != "1" ]]; then
+  echo "CODEX_COMPANION_MOBILE_BETA_AUTHORIZED must be 0 or 1" >&2
+  exit 2
+fi
+if [[ -n "$RELAY_URL" && "$RELAY_URL" != wss://* ]]; then
+  echo "Codex Companion relay URL must use WSS" >&2
+  exit 2
+fi
+if [[ "$MOBILE_BETA_AUTHORIZED" == "1" ]]; then
+  MOBILE_BETA_PLIST_BOOL=true
+fi
+
 suspend_relaunch_agent
 kill_existing_app
 
-swift build --package-path "$ROOT_DIR"
-BUILD_BINARY="$(swift build --package-path "$ROOT_DIR" --show-bin-path)/$APP_NAME"
+swift build --package-path "$ROOT_DIR" --scratch-path "$SWIFT_BUILD_SCRATCH"
+BUILD_BINARY="$(swift build --package-path "$ROOT_DIR" --scratch-path "$SWIFT_BUILD_SCRATCH" --show-bin-path)/$APP_NAME"
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$STAGING_DIR" "$DIST_DIR"
@@ -138,23 +165,39 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$MIN_SYSTEM_VERSION</string>
   <key>LSUIElement</key>
   <true/>
-  <key>NSBonjourServices</key>
-  <array>
-    <string>_codex-companion._tcp.</string>
-  </array>
-  <key>NSLocalNetworkUsageDescription</key>
-  <string>Codex Companion connects to Codex Companion Pocket on your local network.</string>
+  <key>NSLocationUsageDescription</key>
+  <string>Codex Companion uses your location only when you ask the on-device assistant for a location-aware answer.</string>
+  <key>NSLocationWhenInUseUsageDescription</key>
+  <string>Codex Companion uses your location only when you ask the on-device assistant for a location-aware answer.</string>
+  <key>NSCalendarsFullAccessUsageDescription</key>
+  <string>Codex Companion reads upcoming calendar events only when you ask the on-device assistant about your schedule.</string>
+  <key>NSCalendarsUsageDescription</key>
+  <string>Codex Companion reads upcoming calendar events only when you ask the on-device assistant about your schedule.</string>
+  <key>NSRemindersFullAccessUsageDescription</key>
+  <string>Codex Companion reads incomplete reminders only when you ask the on-device assistant about them.</string>
+  <key>NSRemindersUsageDescription</key>
+  <string>Codex Companion reads incomplete reminders only when you ask the on-device assistant about them.</string>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
 </dict>
 </plist>
 PLIST
 
+/usr/bin/plutil -insert CodexCompanionMobileBetaAuthorized -bool "$MOBILE_BETA_PLIST_BOOL" "$INFO_PLIST"
+if [[ "$MOBILE_BETA_AUTHORIZED" == "1" ]]; then
+  /usr/bin/plutil -insert NSBonjourServices -json '["_codex-companion._tcp."]' "$INFO_PLIST"
+  /usr/bin/plutil -insert NSLocalNetworkUsageDescription -string \
+    "Codex Companion connects to authorized Companion mobile clients on your local network." "$INFO_PLIST"
+fi
+
 if [[ -n "$UPDATE_MANIFEST_URL" ]]; then
   /usr/bin/plutil -insert CodexCompanionUpdateManifestURL -string "$UPDATE_MANIFEST_URL" "$INFO_PLIST"
 fi
 if [[ -n "$UPDATE_PUBLIC_KEY" ]]; then
   /usr/bin/plutil -insert CodexCompanionUpdatePublicKey -string "$UPDATE_PUBLIC_KEY" "$INFO_PLIST"
+fi
+if [[ -n "$RELAY_URL" ]]; then
+  /usr/bin/plutil -insert CodexCompanionRelayURL -string "$RELAY_URL" "$INFO_PLIST"
 fi
 
 sign_bundle() {

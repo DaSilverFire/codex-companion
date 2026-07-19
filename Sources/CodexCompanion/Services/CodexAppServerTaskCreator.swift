@@ -34,7 +34,8 @@ enum CodexAppServerTaskRequestFactory {
         model: String? = nil,
         reasoningEffort: String? = nil,
         skillName: String? = nil,
-        skillPath: String? = nil
+        skillPath: String? = nil,
+        attachments: [CodexFollowerAttachment] = []
     ) -> [String: Any] {
         var input: [[String: Any]] = [[
             "type": "text",
@@ -51,6 +52,7 @@ enum CodexAppServerTaskRequestFactory {
                 "path": resolvedSkillPath,
             ])
         }
+        input.append(contentsOf: attachments.map(\.appServerInputItem))
 
         var params: [String: Any] = [
             "threadId": threadID,
@@ -93,6 +95,7 @@ final class CodexAppServerTaskCreator {
         reasoningEffort: String? = nil,
         skillName: String? = nil,
         skillPath: String? = nil,
+        attachments: [CodexFollowerAttachment] = [],
         clientMessageID: String = UUID().uuidString
     ) async -> CodexAppServerTaskCreationOutcome {
         let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -118,6 +121,7 @@ final class CodexAppServerTaskCreator {
                     reasoningEffort: reasoningEffort,
                     skillName: skillName,
                     skillPath: skillPath,
+                    attachments: attachments,
                     clientMessageID: clientMessageID,
                     completion: { outcome in
                         continuation.resume(returning: outcome)
@@ -149,6 +153,7 @@ private final class CodexAppServerTaskCreationSession {
     private let reasoningEffort: String?
     private let skillName: String?
     private let skillPath: String?
+    private let attachments: [CodexFollowerAttachment]
     private let clientMessageID: String
     private let completion: @Sendable (CodexAppServerTaskCreationOutcome) -> Void
     private let process = Process()
@@ -171,6 +176,7 @@ private final class CodexAppServerTaskCreationSession {
         reasoningEffort: String?,
         skillName: String?,
         skillPath: String?,
+        attachments: [CodexFollowerAttachment],
         clientMessageID: String,
         completion: @escaping @Sendable (CodexAppServerTaskCreationOutcome) -> Void
     ) {
@@ -181,6 +187,7 @@ private final class CodexAppServerTaskCreationSession {
         self.reasoningEffort = reasoningEffort
         self.skillName = skillName
         self.skillPath = skillPath
+        self.attachments = attachments
         self.clientMessageID = clientMessageID
         self.completion = completion
     }
@@ -313,7 +320,8 @@ private final class CodexAppServerTaskCreationSession {
                 model: model,
                 reasoningEffort: reasoningEffort,
                 skillName: skillName,
-                skillPath: skillPath
+                skillPath: skillPath,
+                attachments: attachments
             ))
         case RequestID.turnStart:
             guard let threadID else {

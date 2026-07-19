@@ -5,7 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_DIR="${1:-$ROOT_DIR/dist/public-source/CodexCompanion}"
 
 ALLOWLIST=(
+  ".codex-plugin/plugin.json"
   ".gitignore"
+  "LICENSE"
   "Package.swift"
   "README.md"
   "RELEASING.md"
@@ -61,6 +63,7 @@ find "$OUTPUT_DIR" -depth -type d \( \
 
 find "$OUTPUT_DIR" -type f \( \
   -name .DS_Store -o \
+  -name '* 2.swift' -o \
   -name '*.log' -o \
   -name '*.crash' -o \
   -name '*.ips' -o \
@@ -82,13 +85,14 @@ if find "$OUTPUT_DIR" -type f \( \
 fi
 
 # Reject local machine host names, private-key material, API credentials,
-# absolute /Users/ paths, and case-insensitive device identifiers.
+# absolute /Users/ paths, and case-insensitive device identifiers. The
+# all-zero UUID range is reserved for deterministic protocol test fixtures.
 if "$RG_BIN" -n --hidden \
   --pcre2 \
   --glob '!**/Assets/AppIcon/**' \
   --glob '!**/script/export_public_source.sh' \
   --glob '!**/Tests/test_release_packaging.py' \
-  '(/Users/(?!test/)|MacBook-[A-Za-z0-9-]+[.]local|sk-(proj-)?[A-Za-z0-9_-]{20,}|-----BEGIN ([A-Z ]+)?PRIVATE KEY-----|(?i:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}))' \
+  '(/Users/(?!test/)|MacBook-[A-Za-z0-9-]+[.]local|sk-(proj-)?[A-Za-z0-9_-]{20,}|-----BEGIN ([A-Z ]+)?PRIVATE KEY-----|(?i:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?<!00000000-0000-0000-0000-00000000000[0-9]))' \
   "$OUTPUT_DIR"; then
   fail "local path, host name, API key, signing material, or device identifier found"
 fi

@@ -15,8 +15,43 @@ struct CodexAppServerCapabilityService: Sendable {
             models: Self.parseModels(try result(for: 2, in: responses)),
             skills: Self.parseSkills(try result(for: 3, in: responses)),
             plugins: Self.parsePlugins(try result(for: 4, in: responses)),
-            chatAgents: CompanionBridgeChatAgent.builtIns
+            chatAgents: CompanionBridgeChatAgent.builtIns,
+            chatModels: Self.chatModels(
+                hasOpenAIKey: OpenAIAPIKeyStore().hasKey,
+                hasLumoKey: LumoAPIKeyStore().hasKey
+            )
         )
+    }
+
+    static func chatModels(
+        hasOpenAIKey: Bool,
+        hasLumoKey: Bool
+    ) -> [CompanionBridgeChatModel] {
+        let openAIModels = ChatGPTModel.allCases.map { model in
+            CompanionBridgeChatModel(
+                id: "openai:\(model.rawValue)",
+                provider: .openAIAPI,
+                model: model.rawValue,
+                displayName: model.shortTitle,
+                description: hasOpenAIKey ? model.costNote : "Add an OpenAI API key on the Mac",
+                isDefault: false,
+                isAvailable: hasOpenAIKey,
+                supportsAttachments: false
+            )
+        }
+        let lumoModels = LumoModel.allCases.map { model in
+            CompanionBridgeChatModel(
+                id: "lumo:\(model.rawValue)",
+                provider: .lumoAPI,
+                model: model.rawValue,
+                displayName: model.title,
+                description: hasLumoKey ? model.capabilityNote : "Add a Lumo API key on the Mac",
+                isDefault: false,
+                isAvailable: hasLumoKey,
+                supportsAttachments: false
+            )
+        }
+        return [.onDeviceDefault] + openAIModels + lumoModels
     }
 
     private func result(

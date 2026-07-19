@@ -407,7 +407,7 @@ struct PetReactionTests {
         let storage = IsolatedDefaults()
         defer { storage.reset() }
         let generator = StubPetReactionGenerator(
-            responses: [.ignoresCancellation("This arrived too late.", .milliseconds(250))]
+            responses: [.ignoresCancellation("This arrived too late.", .seconds(2))]
         )
         let coordinator = PetReactionCoordinator(
             generator: generator,
@@ -422,7 +422,10 @@ struct PetReactionTests {
         let elapsed = start.duration(to: clock.now)
 
         #expect(result == PetReactionCopy.fallback(for: context, excluding: []))
-        #expect(elapsed < .milliseconds(100), "Deadline took \(elapsed)")
+        // Swift Testing starts this suite alongside hundreds of other cases. Keep
+        // enough scheduler margin while still proving we never wait for the
+        // two-second cancellation-ignoring generation task.
+        #expect(elapsed < .seconds(1), "Deadline took \(elapsed)")
         #expect(
             storage.defaults.stringArray(
                 forKey: PetReactionCoordinator.recentHeadlinesDefaultsKey

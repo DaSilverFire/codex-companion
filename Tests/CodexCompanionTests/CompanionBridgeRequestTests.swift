@@ -77,4 +77,16 @@ struct CompanionBridgeRequestTests {
 
         #expect(decoded.operation == operation)
     }
+
+    @Test
+    func bridgeMessagesDecodeWhenOlderPeersOmitAttachments() throws {
+        let data = Data(
+            #"{"id":"message-1","role":"assistant","text":"Ready","createdAt":null}"#.utf8
+        )
+
+        let message = try JSONDecoder().decode(CompanionBridgeMessage.self, from: data)
+
+        #expect(message.text == "Ready")
+        #expect(message.attachments == nil)
+    }
 }

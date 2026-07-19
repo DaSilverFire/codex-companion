@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum CompanionSettingsTab: String, CaseIterable, Identifiable {
@@ -29,6 +30,7 @@ enum CompanionSettingsTab: String, CaseIterable, Identifiable {
 
 struct SettingsView: View {
     @ObservedObject var model: CompanionAppModel
+    @ObservedObject private var mobileRuntime = CompanionMobileRuntimeController.shared
     @StateObject private var updateService = CompanionUpdateService()
     @State private var selectedTab: CompanionSettingsTab = .general
     @State private var mobilePairing: CompanionBridgeActivePairing?
@@ -48,9 +50,11 @@ struct SettingsView: View {
                 .tabItem { Label(CompanionSettingsTab.chat.title, systemImage: CompanionSettingsTab.chat.systemImage) }
                 .tag(CompanionSettingsTab.chat)
 
-            mobileSettings
-                .tabItem { Label(CompanionSettingsTab.mobile.title, systemImage: CompanionSettingsTab.mobile.systemImage) }
-                .tag(CompanionSettingsTab.mobile)
+            if mobileRuntime.isAvailable {
+                mobileSettings
+                    .tabItem { Label(CompanionSettingsTab.mobile.title, systemImage: CompanionSettingsTab.mobile.systemImage) }
+                    .tag(CompanionSettingsTab.mobile)
+            }
 
             updateSettings
                 .tabItem { Label(CompanionSettingsTab.updates.title, systemImage: CompanionSettingsTab.updates.systemImage) }
@@ -58,17 +62,25 @@ struct SettingsView: View {
         }
         .frame(width: 560, height: 520)
         .onAppear {
-            mobilePairing = CompanionPairingCoordinator.shared.activePairing()
-            reloadPairedMobileDevices()
-            relayURLInput = CompanionRelaySettings.configuredURL()?.absoluteString ?? ""
+            reloadMobileSettingsIfEnabled()
         }
         .onReceive(
             NotificationCenter.default.publisher(
                 for: CompanionPairingCoordinator.pairingStateDidChange
             )
         ) { _ in
+            guard mobileRuntime.isEnabled else { return }
             mobilePairing = CompanionPairingCoordinator.shared.activePairing()
             reloadPairedMobileDevices()
+        }
+        .onChange(of: mobileRuntime.isEnabled) { _, isEnabled in
+            if isEnabled {
+                reloadMobileSettingsIfEnabled()
+            } else {
+                mobilePairing = nil
+                pairedMobileDevices = []
+                relayStatusText = ""
+            }
         }
         .task(id: mobilePairing?.expiresAt) {
             guard let expiresAt = mobilePairing?.expiresAt else { return }
@@ -219,86 +231,107 @@ struct SettingsView: View {
 
     private var mobileSettings: some View {
         Form {
-            Section("Availability") {
-                Toggle(
-                    "Keep Mac available while display is off",
-                    isOn: $keepMacAvailableWhileDisplayOff
-                )
-                .onChange(of: keepMacAvailableWhileDisplayOff) { _, isEnabled in
-                    CompanionPowerAvailabilityPreferences()
-                        .setKeepMacAvailableWhileDisplayOff(isEnabled)
-                }
+            Section("Mobile Companion") {
+                Toggle("Enable Mobile Companion", isOn: mobileRuntimeBinding)
 
-                Text("Keeps nearby and remote Companion access available through screen saver, display sleep, and lock. Closing a Mac laptop still puts it to sleep.")
+                Text(
+                    mobileRuntime.isEnabled
+                        ? "Nearby discovery and encrypted access for paired devices are active."
+                        : "Discovery, relay connections, mobile task services, and display-sleep availability are stopped and released."
+                )
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            Section("Paired Devices") {
-                if let activePairing = mobilePairing {
-                    LabeledContent("Pairing code") {
-                        Text(formattedPairingCode(activePairing.code))
-                            .font(.system(.title2, design: .monospaced, weight: .semibold))
-                            .textSelection(.enabled)
+            if mobileRuntime.isEnabled {
+                Section("Availability") {
+                    Toggle(
+                        "Keep Mac available while display is off",
+                        isOn: $keepMacAvailableWhileDisplayOff
+                    )
+                    .onChange(of: keepMacAvailableWhileDisplayOff) { _, isEnabled in
+                        CompanionPowerAvailabilityPreferences()
+                            .setKeepMacAvailableWhileDisplayOff(isEnabled)
                     }
 
-                    Text("Expires \(activePairing.expiresAt.formatted(date: .omitted, time: .standard))")
+                    Text("Keeps nearby and remote Companion access available through screen saver, display sleep, and lock. Closing a Mac laptop still puts it to sleep.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-
-                    Button("Cancel Pairing", role: .cancel) {
-                        CompanionPairingCoordinator.shared.cancelPairing()
-                        mobilePairing = nil
-                    }
-                } else {
-                    Button {
-                        mobilePairing = CompanionPairingCoordinator.shared.beginPairing()
-                    } label: {
-                        Label("Pair iPhone", systemImage: "iphone.and.arrow.forward")
-                    }
                 }
 
-                if pairedMobileDevices.isEmpty {
-                    Text("No iPhones are paired.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(pairedMobileDevices) { device in
-                        LabeledContent {
-                            Button("Forget", role: .destructive) {
-                                try? CompanionPairingCoordinator.shared.forget(deviceID: device.deviceID)
-                                reloadPairedMobileDevices()
-                            }
+                Section("Paired Devices") {
+                    if let activePairing = mobilePairing {
+                        LabeledContent("Pairing code") {
+                            Text(formattedPairingCode(activePairing.code))
+                                .font(.system(.title2, design: .monospaced, weight: .semibold))
+                                .textSelection(.enabled)
+                        }
+
+                        Text("Expires \(activePairing.expiresAt.formatted(date: .omitted, time: .standard))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Button("Cancel Pairing", role: .cancel) {
+                            CompanionPairingCoordinator.shared.cancelPairing()
+                            mobilePairing = nil
+                        }
+                    } else {
+                        Button {
+                            mobilePairing = CompanionPairingCoordinator.shared.beginPairing()
                         } label: {
-                            Label(device.displayName, systemImage: "iphone")
+                            Label("Pair iPhone", systemImage: "iphone.and.arrow.forward")
+                        }
+                    }
+
+                    if pairedMobileDevices.isEmpty {
+                        Text("No iPhones are paired.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(pairedMobileDevices) { device in
+                            LabeledContent {
+                                Button("Forget", role: .destructive) {
+                                    try? CompanionPairingCoordinator.shared.forget(deviceID: device.deviceID)
+                                    reloadPairedMobileDevices()
+                                }
+                            } label: {
+                                Label(device.displayName, systemImage: "iphone")
+                            }
                         }
                     }
                 }
-            }
 
-            Section("Remote Access") {
-                TextField("Secure relay URL", text: $relayURLInput)
-                    .textFieldStyle(.roundedBorder)
-                    .help("Use a wss:// endpoint. ws:// is accepted only for localhost testing.")
+                Section("Remote Access") {
+                    TextField("Secure relay URL", text: $relayURLInput)
+                        .textFieldStyle(.roundedBorder)
+                        .help("Use a wss:// endpoint. ws:// is accepted only for localhost testing.")
 
-                HStack {
-                    Button("Save") {
-                        saveRelayURL()
+                    HStack {
+                        Button("Save") {
+                            saveRelayURL()
+                        }
+
+                        Button("Use Automatic") {
+                            CompanionRelaySettings.useBundledRelay()
+                            relayURLInput = CompanionRelaySettings.configuredURL()?.absoluteString ?? ""
+                            relayStatusText = "Automatic secure relay restored. Reconnect the paired phone nearby once to synchronize it."
+                        }
+                        .disabled(CompanionRelaySettings.bundledURL() == nil)
+
+                        Button("Disable", role: .destructive) {
+                            relayURLInput = ""
+                            saveRelayURL()
+                        }
+                        .disabled(CompanionRelaySettings.configuredURL() == nil)
                     }
 
-                    Button("Disable", role: .destructive) {
-                        relayURLInput = ""
-                        saveRelayURL()
-                    }
-                    .disabled(CompanionRelaySettings.configuredURL() == nil)
+                    Text(
+                        relayStatusText.isEmpty
+                            ? "A secure relay lets a paired phone reach this Mac from cellular or another network."
+                            : relayStatusText
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
-
-                Text(
-                    relayStatusText.isEmpty
-                        ? "A secure relay lets a paired phone reach this Mac from cellular or another network."
-                        : relayStatusText
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -327,12 +360,30 @@ struct SettingsView: View {
                 }
                 .disabled(updateService.state == .checking)
 
-                if case let .available(release) = updateService.state,
-                   let downloadURL = URL(string: release.downloadURL)
-                {
-                    Link(destination: downloadURL) {
-                        Label("Open Verified Release", systemImage: "arrow.up.right.square")
+                if case .available = updateService.state {
+                    Button {
+                        Task {
+                            await updateService.downloadAvailableUpdate()
+                        }
+                    } label: {
+                        Label("Download Verified Update", systemImage: "arrow.down.circle")
                     }
+                }
+
+                if case .downloading = updateService.state {
+                    ProgressView("Downloading and verifying update...")
+                }
+
+                if case .readyToInstall = updateService.state {
+                    Button {
+                        updateService.installReadyUpdate()
+                    } label: {
+                        Label("Install and Relaunch", systemImage: "arrow.down.app")
+                    }
+                }
+
+                if case .installing = updateService.state {
+                    ProgressView("Installing update and relaunching Companion...")
                 }
             }
         }
@@ -343,6 +394,13 @@ struct SettingsView: View {
         Binding(
             get: { model.petStore.selectedPetID ?? model.petStore.pets.first?.id ?? "" },
             set: { model.petStore.selectedPetID = $0 }
+        )
+    }
+
+    private var mobileRuntimeBinding: Binding<Bool> {
+        Binding(
+            get: { mobileRuntime.isEnabled },
+            set: { mobileRuntime.setEnabled($0) }
         )
     }
 
@@ -358,13 +416,30 @@ struct SettingsView: View {
             "Codex Companion is up to date."
         case .available(let release):
             "Version \(release.version) is available."
+        case .downloading(let release):
+            "Downloading and verifying version \(release.version)..."
+        case .readyToInstall(let release, _):
+            "Version \(release.version) is verified and ready to install."
+        case .installing(let release):
+            "Installing version \(release.version). Companion will reopen automatically."
         case .failed(let message):
-            "Update check failed: \(message)"
+            "Update failed: \(message)"
         }
     }
 
     private func reloadPairedMobileDevices() {
         pairedMobileDevices = CompanionPairingCoordinator.shared.trustedRecords()
+    }
+
+    private func reloadMobileSettingsIfEnabled() {
+        guard mobileRuntime.isAvailable, mobileRuntime.isEnabled else {
+            mobilePairing = nil
+            pairedMobileDevices = []
+            return
+        }
+        mobilePairing = CompanionPairingCoordinator.shared.activePairing()
+        reloadPairedMobileDevices()
+        relayURLInput = CompanionRelaySettings.configuredURL()?.absoluteString ?? ""
     }
 
     private func formattedPairingCode(_ code: String) -> String {

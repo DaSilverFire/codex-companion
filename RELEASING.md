@@ -24,19 +24,22 @@ For a public release, configure these outside the repository:
 export CODEX_COMPANION_BUILD_NUMBER="1"
 export CODEX_COMPANION_CODESIGN_IDENTITY="Developer ID Application: SilverFire (YOUR_TEAM_ID)"
 export CODEX_COMPANION_NOTARY_PROFILE="codex-companion-notary"
+export CODEX_COMPANION_RELAY_URL="wss://YOUR-STABLE-RELAY.example/relay"
 ```
 
 Create the notary profile with `xcrun notarytool store-credentials`. Keep certificates, App Store Connect keys, profiles, and passwords out of the repository.
 
 `VERSION` is the default app version for local builds, release artifacts, and the plugin source snapshot. A release version must be unused by both local tags and GitHub Releases. `CODEX_COMPANION_VERSION` is reserved for an intentional release-job override and must match the approved release plan.
 
-If signing credentials are absent, `create_release.sh` creates an ad-hoc signed DMG and prints a Gatekeeper warning. Its generated installer command clearly identifies the build as pre-notarized, requires explicit user confirmation, and then enables the installer's ad-hoc verification path. Do not describe that artifact as notarized or Gatekeeper-trusted.
+`CODEX_COMPANION_RELAY_URL` must be the verified, durable `wss://` endpoint owned by the release operator. The app embeds only the relay origin and path; opaque per-device channel capabilities and encrypted task payloads are derived after nearby pairing and are never part of the release artifact. Do not use a temporary preview URL for a release.
 
-The underlying installer still rejects an ad-hoc app by default. `CODEX_COMPANION_ALLOW_ADHOC=1` is enabled only by the generated confirmation wrapper or by a maintainer exercising a local artifact directly.
+If signing credentials are absent, `create_release.sh` creates an ad-hoc signed DMG and prints a Gatekeeper warning. Its installer clearly identifies the build as pre-notarized, requires explicit confirmation, and then enables the transactional installer's ad-hoc verification path. A GitHub release using this path must be labeled pre-notarized and must not be described as notarized or Gatekeeper-trusted.
+
+The underlying installer still rejects an ad-hoc app by default. `CODEX_COMPANION_ALLOW_ADHOC=1` is enabled only by the generated confirmation wrapper, by the authenticated in-app updater, or by a maintainer exercising a local artifact directly.
 
 ## Signed update channel
 
-The Settings updater consumes a small JSON manifest hosted with GitHub Releases. Configure the app at build time:
+The Settings updater consumes a small JSON manifest hosted with GitHub Releases. Official SilverFire builds default to the repository's `latest/download/update.json` feed and embedded public key. Override those values only when testing a separate release channel:
 
 ```bash
 export CODEX_COMPANION_UPDATE_MANIFEST_URL="https://github.com/OWNER/REPOSITORY/releases/latest/download/update.json"
@@ -44,6 +47,8 @@ export CODEX_COMPANION_UPDATE_PUBLIC_KEY="BASE64_RAW_32_BYTE_PUBLIC_KEY"
 export CODEX_COMPANION_UPDATE_DOWNLOAD_URL="https://github.com/OWNER/REPOSITORY/releases/download/vVERSION/Codex-Companion-VERSION-BUILD-universal.dmg"
 export CODEX_COMPANION_UPDATE_PRIVATE_KEY_BASE64="BASE64_RAW_32_BYTE_PRIVATE_KEY"
 ```
+
+For local SilverFire releases, `create_release.sh` also looks for the private key in the login Keychain item `com.silverfire.codexcompanion.update-signing-key` with account `release`. The private key is never embedded in the app or source tree.
 
 The build maps the first two values into the `CodexCompanionUpdateManifestURL` and `CodexCompanionUpdatePublicKey` Info.plist keys.
 
@@ -64,7 +69,11 @@ size
 
 The `signature` field is the base64 Ed25519 signature over that payload. The app rejects non-HTTPS downloads, malformed digests, invalid sizes, unknown schemas, and invalid signatures.
 
-The current updater checks and authenticates the release channel and reports availability in Settings. It does not silently self-modify. Installation remains an explicit DMG action with an app-and-skill rollback boundary. Until a manifest URL and public key are embedded, Settings displays an explicit unavailable state.
+The updater checks and authenticates the release channel, downloads the DMG, and verifies its signed size and SHA-256 digest. The user must then choose **Install and Relaunch** in Settings. That explicit action launches a detached helper which rechecks the artifact, mounts it read-only, and runs the release's transactional installer so the old app can stop without terminating the update. The installer preserves the app-and-skill rollback boundary and reopens Companion after a successful replacement. Builds pointed at a custom channel without a manifest URL and public key display an explicit unavailable state.
+
+For an older authenticated release that wraps an ad-hoc local payload in an interactive first-install warning, the updater invokes the bundled transactional installer directly and permits the ad-hoc signature only after the signed manifest, size, and SHA-256 checks pass. Manual installer launches retain their normal warning and trust policy.
+
+An authorized mobile-beta build seeds a local access grant on first launch. Signed updates preserve that grant, so an authorized installation does not lose Mobile Companion when it later installs a normal public update. Fresh public installs do not receive the grant, and disabling Mobile Companion still tears down discovery, bridge, relay, task, and power-availability services.
 
 ## Build the artifact
 

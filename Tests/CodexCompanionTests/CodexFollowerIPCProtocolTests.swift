@@ -5,6 +5,19 @@ import Testing
 @Suite
 struct CodexFollowerIPCProtocolTests {
     @Test
+    func socketCandidatesPreferCurrentChatGPTEndpointBeforeLegacyFallback() {
+        let candidates = CodexFollowerIPCProtocol.socketURLs(
+            homeDirectory: URL(fileURLWithPath: "/Users/test/home", isDirectory: true),
+            temporaryDirectory: URL(fileURLWithPath: "/private/tmp/session", isDirectory: true)
+        )
+
+        #expect(candidates.count == 2)
+        #expect(candidates[0].path == "/Users/test/home/.codex/ipc/ipc.sock")
+        #expect(candidates[1].path.hasPrefix("/private/tmp/session/codex-ipc/ipc-"))
+        #expect(candidates[1].path.hasSuffix(".sock"))
+    }
+
+    @Test
     func frameUsesLittleEndianLengthPrefixAndRoundTripsJSON() throws {
         let message: [String: Any] = [
             "type": "request",
@@ -96,6 +109,78 @@ struct CodexFollowerIPCProtocolTests {
         let input = turnStartParams?["input"] as? [[String: Any]]
         #expect(input?.first?["text"] as? String == "Follow up")
         #expect(turnStartParams?["threadId"] == nil)
+    }
+
+    @Test
+    func attachmentPayloadMatchesTheNativeComposerContract() throws {
+        let file = CodexFollowerAttachment(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            kind: .file,
+            label: "notes.txt",
+            path: "/tmp/notes.txt",
+            fsPath: "/tmp/notes.txt",
+            mimeType: "text/plain"
+        )
+        let image = CodexFollowerAttachment(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+            kind: .image,
+            label: "reference.png",
+            path: "/tmp/reference.png",
+            fsPath: "/tmp/reference.png",
+            mimeType: "image/png"
+        )
+
+        let request = CodexFollowerIPCProtocol.actionRequest(
+            requestID: "attachment-id",
+            clientID: "client-id",
+            threadID: "thread-id",
+            prompt: "Use these references",
+            action: .steer,
+            clientMessageID: "message-id",
+            cwd: "/tmp/project",
+            attachments: [file, image]
+        )
+
+        let params = try #require(request["params"] as? [String: Any])
+        let nativeAttachments = try #require(params["attachments"] as? [[String: Any]])
+        #expect(nativeAttachments.count == 2)
+        #expect(nativeAttachments.first?["label"] as? String == "notes.txt")
+
+        let input = try #require(params["input"] as? [[String: Any]])
+        #expect(input.count == 2)
+        #expect(input.last?["type"] as? String == "localImage")
+        #expect(input.last?["path"] as? String == "/tmp/reference.png")
+
+        let restoreMessage = try #require(params["restoreMessage"] as? [String: Any])
+        let context = try #require(restoreMessage["context"] as? [String: Any])
+        let fileAttachments = try #require(context["fileAttachments"] as? [[String: Any]])
+        #expect(fileAttachments.count == 1)
+        #expect(fileAttachments.first?["label"] as? String == "notes.txt")
+        let imageAttachments = try #require(context["imageAttachments"] as? [[String: Any]])
+        #expect(imageAttachments.count == 1)
+        #expect(imageAttachments.first?["filename"] as? String == "reference.png")
+        #expect(imageAttachments.first?["mimeType"] as? String == "image/png")
+    }
+
+    @Test
+    func threadSettingsRequestMatchesTheChatGPTRouterContract() throws {
+        let request = CodexFollowerIPCProtocol.threadSettingsRequest(
+            requestID: "settings-id",
+            clientID: "client-id",
+            threadID: "thread-id",
+            model: "gpt-5.6-sol",
+            reasoningEffort: "xhigh"
+        )
+
+        #expect(request["method"] as? String == "thread-follower-update-thread-settings")
+        #expect(request["version"] as? Int == 1)
+        #expect(request["sourceClientId"] as? String == "client-id")
+        #expect(request["timeoutMs"] as? Int == CodexFollowerIPCProtocol.routerTimeoutMilliseconds)
+        let params = try #require(request["params"] as? [String: Any])
+        #expect(params["conversationId"] as? String == "thread-id")
+        let settings = try #require(params["threadSettings"] as? [String: Any])
+        #expect(settings["model"] as? String == "gpt-5.6-sol")
+        #expect(settings["effort"] as? String == "xhigh")
     }
 
     @Test

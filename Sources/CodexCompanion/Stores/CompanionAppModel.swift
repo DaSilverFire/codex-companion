@@ -771,7 +771,9 @@ final class CompanionAppModel: ObservableObject {
     }
 
     func setPetHovering(_ isHovering: Bool) {
-        isPetPointerHovered = isHovering
+        if isPetPointerHovered != isHovering {
+            isPetPointerHovered = isHovering
+        }
         guard isPetHovered != isHovering else { return }
         clearDirectionalLook()
         isPetHovered = isHovering

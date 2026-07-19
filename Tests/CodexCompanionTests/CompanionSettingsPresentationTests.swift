@@ -35,4 +35,17 @@ struct CompanionSettingsPresentationTests {
         #expect(!source.contains("menuSummary"))
         #expect(!source.contains("Reload Pets"))
     }
+
+    @Test
+    func mobileSettingsCanRestoreTheBundledAutomaticRelay() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(contentsOf: root
+            .appendingPathComponent("Sources/CodexCompanion/Views/SettingsView.swift"))
+
+        #expect(source.contains("Use Automatic"))
+        #expect(source.contains("CompanionRelaySettings.useBundledRelay()"))
+    }
 }

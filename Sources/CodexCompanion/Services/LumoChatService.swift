@@ -1,6 +1,10 @@
 import Foundation
 
-struct LumoChatService {
+protocol LumoChatServing: Sendable {
+    func send(prompt: String, model: LumoModel, apiKey: String) async throws -> LumoChatResult
+}
+
+struct LumoChatService: LumoChatServing {
     static let defaultEndpoint = URL(string: "https://lumo.proton.me/api/ai/v1/chat/completions")!
 
     private let session: URLSession

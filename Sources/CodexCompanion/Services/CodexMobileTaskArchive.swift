@@ -22,6 +22,7 @@ struct CodexMobileTaskArchive: Sendable {
     private static let maximumLineSize = 2 * 1024 * 1024
     private static let maximumInlineMediaSize = 1024 * 1024
     private static let maximumToolDetailSize = 2_000
+    private static let suppressedToolWrapperTitle = "__companion_suppressed_tool_wrapper__"
 
     private struct RawTimelineRecord {
         var offset: UInt64
@@ -33,9 +34,24 @@ struct CodexMobileTaskArchive: Sendable {
         var item: CompanionBridgeTimelineItem
     }
 
+    private enum TaskLifecycleStatus {
+        case active
+        case completed
+        case failed
+    }
+
     private struct TaskLifecycleState {
-        var isActive: Bool
+        var status: TaskLifecycleStatus
         var turnID: String?
+
+        var isActive: Bool {
+            status == .active
+        }
+    }
+
+    private struct LatestTaskRolloutState {
+        var assistantMessage: (text: String, turnID: String?)?
+        var lifecycle: TaskLifecycleState?
     }
 
     private struct DelegationSummary {
@@ -93,12 +109,14 @@ struct CodexMobileTaskArchive: Sendable {
             let firstMessage = columns[4].trimmingCharacters(in: .whitespacesAndNewlines)
             let storedPreview = columns[6].trimmingCharacters(in: .whitespacesAndNewlines)
             let updatedAt = date(fromMilliseconds: columns[3]) ?? .distantPast
-            let latest = latestVisibleMessage(in: rolloutURL(from: columns[5]))
+            let latest = latestTaskRolloutState(in: rolloutURL(from: columns[5]))
             let needsApproval = pendingApprovalThreadIDs.contains(threadID)
             let elapsed = now.timeIntervalSince(updatedAt)
-            let status: CompanionBridgeTaskStatus = needsApproval
-                ? .waiting
-                : elapsed < 3 * 60 ? .running : .completed
+            let status = taskStatus(
+                needsApproval: needsApproval,
+                lifecycle: latest.lifecycle,
+                elapsedSinceUpdate: elapsed
+            )
             return CompanionBridgeTask(
                 id: threadID,
                 title: displayTitle(
@@ -108,12 +126,17 @@ struct CodexMobileTaskArchive: Sendable {
                     firstMessage: firstMessage,
                     sessionNames: sessionNames
                 ),
-                preview: latest?.text ?? nonempty(storedPreview) ?? nonempty(firstMessage) ?? "No messages yet",
+                preview: latest.assistantMessage?.text
+                    ?? nonempty(storedPreview)
+                    ?? nonempty(firstMessage)
+                    ?? "No messages yet",
                 updatedAt: updatedAt,
                 cwd: nonempty(cwd),
                 status: status,
                 needsApproval: needsApproval,
-                activeTurnID: latest?.turnID,
+                activeTurnID: latest.lifecycle?.isActive == true
+                    ? latest.lifecycle?.turnID
+                    : nil,
                 model: nonempty(columns[7]),
                 reasoningEffort: nonempty(columns[8]),
                 taskGroup: sidebarOrdering.taskGroup(threadID: threadID, cwd: nonempty(cwd))
@@ -124,6 +147,24 @@ struct CodexMobileTaskArchive: Sendable {
             tasks: tasks,
             nextCursor: sortedRows.count > offset + limit ? String(offset + limit) : nil
         )
+    }
+
+    private func taskStatus(
+        needsApproval: Bool,
+        lifecycle: TaskLifecycleState?,
+        elapsedSinceUpdate: TimeInterval
+    ) -> CompanionBridgeTaskStatus {
+        if needsApproval { return .waiting }
+        switch lifecycle?.status {
+        case .active:
+            return .running
+        case .completed:
+            return .completed
+        case .failed:
+            return .failed
+        case nil:
+            return elapsedSinceUpdate < 3 * 60 ? .running : .completed
+        }
     }
 
     private func orderingEntry(
@@ -412,6 +453,13 @@ struct CodexMobileTaskArchive: Sendable {
            }) {
             pageRecords[reasoningIndex].item.status = .inProgress
         }
+        if cursor == nil, latestTaskLifecycle?.isActive == false {
+            for index in pageRecords.indices
+            where pageRecords[index].item.kind == .tool
+                && pageRecords[index].item.status == .inProgress {
+                pageRecords[index].item.status = .completed
+            }
+        }
         let hasOlderItems = semanticRecords.count > pageRecords.count || endOffset > 0
         let nextCursor = hasOlderItems
             ? pageRecords.first.map { String($0.offset) }
@@ -450,21 +498,23 @@ struct CodexMobileTaskArchive: Sendable {
         }) { $0.item.callID! }
 
         var projected: [SemanticTimelineRecord] = []
-        var activeReasoningIndex: Int?
         var delegationContext: (index: Int, targetID: String?)?
 
         for record in records {
             var item = record.item
 
+            if item.kind == .tool, item.title == Self.suppressedToolWrapperTitle {
+                continue
+            }
+
             if item.kind == .tool, item.title == "Tool result" {
                 if let callID = item.callID, representedCallIDs.contains(callID) {
                     continue
                 }
-                appendStandaloneOrGroupedTool(
-                    record: SemanticTimelineRecord(offset: record.offset, item: item),
-                    projected: &projected,
-                    activeReasoningIndex: &activeReasoningIndex
-                )
+                guard item.status == .failed || item.detail != nil || !item.media.isEmpty else {
+                    continue
+                }
+                projected.append(SemanticTimelineRecord(offset: record.offset, item: item))
                 delegationContext = nil
                 continue
             }
@@ -472,12 +522,10 @@ struct CodexMobileTaskArchive: Sendable {
             switch item.kind {
             case .message, .status, .compaction:
                 projected.append(SemanticTimelineRecord(offset: record.offset, item: item))
-                activeReasoningIndex = nil
                 delegationContext = nil
 
             case .reasoning:
                 projected.append(SemanticTimelineRecord(offset: record.offset, item: item))
-                activeReasoningIndex = projected.index(before: projected.endIndex)
                 delegationContext = nil
 
             case .tool:
@@ -506,7 +554,6 @@ struct CodexMobileTaskArchive: Sendable {
                             summary.targetID
                         )
                     }
-                    activeReasoningIndex = nil
                     continue
                 }
 
@@ -515,8 +562,6 @@ struct CodexMobileTaskArchive: Sendable {
                     guard item.status == .failed || !item.media.isEmpty else { continue }
                     if let context = delegationContext {
                         mergeTool(item, into: &projected[context.index].item)
-                    } else if let activeReasoningIndex {
-                        mergeTool(item, into: &projected[activeReasoningIndex].item)
                     } else {
                         projected.append(SemanticTimelineRecord(offset: record.offset, item: item))
                     }
@@ -525,26 +570,10 @@ struct CodexMobileTaskArchive: Sendable {
 
                 mergeOutputMediaAndFailure(outputs, into: &item, includesText: true)
                 delegationContext = nil
-                if let activeReasoningIndex {
-                    mergeTool(item, into: &projected[activeReasoningIndex].item)
-                } else {
-                    projected.append(SemanticTimelineRecord(offset: record.offset, item: item))
-                }
+                projected.append(SemanticTimelineRecord(offset: record.offset, item: item))
             }
         }
         return projected
-    }
-
-    private func appendStandaloneOrGroupedTool(
-        record: SemanticTimelineRecord,
-        projected: inout [SemanticTimelineRecord],
-        activeReasoningIndex: inout Int?
-    ) {
-        if let activeReasoningIndex {
-            mergeTool(record.item, into: &projected[activeReasoningIndex].item)
-        } else {
-            projected.append(record)
-        }
     }
 
     private func mergeOutputMediaAndFailure(
@@ -552,10 +581,31 @@ struct CodexMobileTaskArchive: Sendable {
         into item: inout CompanionBridgeTimelineItem,
         includesText: Bool
     ) {
+        var semanticEditOutputs: Set<String> = []
+        if item.title == "Edited files" {
+            var recoveredPaths: [String] = []
+            for output in outputs where output.item.status != .failed {
+                guard let detail = output.item.detail,
+                      let paths = CodexMobileToolProjection.editedFilePaths(
+                          fromToolOutput: detail
+                      )
+                else { continue }
+                semanticEditOutputs.insert(detail)
+                for path in paths.split(separator: "\n").map(String.init)
+                where !recoveredPaths.contains(path) {
+                    recoveredPaths.append(path)
+                }
+            }
+            if !recoveredPaths.isEmpty {
+                mergeUniqueLines(recoveredPaths, into: &item.detail)
+            }
+        }
+
         for output in outputs {
             if includesText,
                let detail = output.item.detail,
-               detail != item.detail {
+               detail != item.detail,
+               !semanticEditOutputs.contains(detail) {
                 appendDetail("Result\n\(detail)", to: &item.detail)
             }
             appendMedia(output.item.media, to: &item.media)
@@ -563,6 +613,21 @@ struct CodexMobileTaskArchive: Sendable {
                 item.status = .failed
             }
         }
+        item.status = CodexMobileToolLifecycle.resolvedStatus(
+            callStatus: item.status,
+            outputStatuses: outputs.map(\.item.status)
+        )
+    }
+
+    private func mergeUniqueLines(_ values: [String], into existing: inout String?) {
+        var lines = (existing ?? "")
+            .split(separator: "\n")
+            .map(String.init)
+            .compactMap(nonempty)
+        for value in values.compactMap(nonempty) where !lines.contains(value) {
+            lines.append(value)
+        }
+        existing = lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
 
     private func mergeTool(
@@ -658,9 +723,11 @@ struct CodexMobileTaskArchive: Sendable {
         let turnID = payload["turn_id"] as? String
         switch type {
         case "task_started", "turn_started":
-            return TaskLifecycleState(isActive: true, turnID: turnID)
-        case "task_complete", "task_completed", "turn_complete", "turn_completed", "task_aborted":
-            return TaskLifecycleState(isActive: false, turnID: turnID)
+            return TaskLifecycleState(status: .active, turnID: turnID)
+        case "task_complete", "task_completed", "turn_complete", "turn_completed":
+            return TaskLifecycleState(status: .completed, turnID: turnID)
+        case "task_aborted", "task_failed", "turn_aborted", "turn_failed":
+            return TaskLifecycleState(status: .failed, turnID: turnID)
         default:
             return nil
         }
@@ -740,12 +807,17 @@ struct CodexMobileTaskArchive: Sendable {
            payloadType == "custom_tool_call" || payloadType == "function_call" {
             let name = (payload["name"] as? String) ?? "tool"
             let input = (payload["input"] as? String) ?? (payload["arguments"] as? String)
+            let projection = CodexMobileToolProjection.project(name: name, input: input)
             return CompanionBridgeTimelineItem(
                 id: id,
                 kind: .tool,
-                status: toolStatus(from: payload["status"] as? String),
-                title: toolTitle(name: name, input: input),
-                detail: toolDetail(name: name, from: input),
+                status: CodexMobileToolLifecycle.callStatus(
+                    from: payload["status"] as? String
+                ),
+                title: projection.omitsWrapper
+                    ? Self.suppressedToolWrapperTitle
+                    : projection.title,
+                detail: projection.omitsWrapper ? nil : boundedDetail(projection.detail),
                 createdAt: createdAt,
                 turnID: turnID,
                 callID: payload["call_id"] as? String
@@ -756,7 +828,6 @@ struct CodexMobileTaskArchive: Sendable {
            payloadType == "function_call_output" || payloadType == "custom_tool_call_output" {
             let media = inlineMedia(from: payload["output"], messageID: id)
             let detail = textualToolOutput(from: payload["output"])
-            guard !media.isEmpty || detail != nil else { return nil }
             return CompanionBridgeTimelineItem(
                 id: id,
                 kind: .tool,
@@ -798,6 +869,9 @@ struct CodexMobileTaskArchive: Sendable {
                 kind: .tool,
                 status: succeeded ? .completed : .failed,
                 title: succeeded ? "Edited files" : "File edit failed",
+                detail: boundedDetail(
+                    CodexMobileToolProjection.editedFilePaths(fromChanges: payload["changes"])
+                ),
                 createdAt: createdAt,
                 turnID: turnID,
                 callID: payload["call_id"] as? String
@@ -805,14 +879,20 @@ struct CodexMobileTaskArchive: Sendable {
         case "mcp_tool_call_end":
             let invocation = payload["invocation"] as? [String: Any]
             let tool = invocation?["tool"] as? String ?? "tool"
+            let server = invocation?["server"] as? String
             let arguments = invocation?["arguments"]
             let detail = arguments.flatMap { try? JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys]) }
                 .map { String(decoding: $0, as: UTF8.self) }
+            let projection = CodexMobileToolProjection.project(
+                name: tool,
+                input: detail,
+                server: server
+            )
             return CompanionBridgeTimelineItem(
                 id: id,
                 kind: .tool,
-                title: toolTitle(name: tool, input: detail),
-                detail: boundedDetail(detail),
+                title: projection.title,
+                detail: boundedDetail(projection.detail),
                 createdAt: createdAt,
                 turnID: turnID,
                 callID: payload["call_id"] as? String
@@ -899,7 +979,11 @@ struct CodexMobileTaskArchive: Sendable {
             return "Ran a command"
         }
         if leafName == "js" && normalizedName.contains("node_repl") {
-            return "Ran JavaScript"
+            return "Inspected an app"
+        }
+        if leafName == "tool_search" || leafName == "search_tools"
+            || leafName == "list_tools" || normalizedName.contains("tool_search") {
+            return "Loaded tools"
         }
         if leafName == "view_image" || leafName.contains("screenshot") {
             return "Viewed an image"
@@ -919,6 +1003,9 @@ struct CodexMobileTaskArchive: Sendable {
         }
         if leafName == "open", normalizedName.contains("browser") {
             return "Opened a link"
+        }
+        if normalizedName.hasPrefix("mcp__") {
+            return "Used an integration"
         }
 
         return leafName
@@ -975,20 +1062,33 @@ struct CodexMobileTaskArchive: Sendable {
         """).first?.first
     }
 
-    private func latestVisibleMessage(in url: URL) -> (text: String, turnID: String?)? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    private func latestTaskRolloutState(in url: URL) -> LatestTaskRolloutState {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return LatestTaskRolloutState()
+        }
         defer { try? handle.close() }
-        guard let size = try? handle.seekToEnd(), size > 0 else { return nil }
+        guard let size = try? handle.seekToEnd(), size > 0 else {
+            return LatestTaskRolloutState()
+        }
         let readLength = min(size, UInt64(1024 * 1024))
         try? handle.seek(toOffset: size - readLength)
         let data = handle.readDataToEndOfFile()
+        var state = LatestTaskRolloutState()
         for line in data.split(separator: 0x0A, omittingEmptySubsequences: true).reversed() {
-            if let parsed = visibleMessage(from: Data(line), fallbackID: UUID().uuidString),
+            let lineData = Data(line)
+            if state.lifecycle == nil {
+                state.lifecycle = taskLifecycleState(from: lineData)
+            }
+            if state.assistantMessage == nil,
+               let parsed = visibleMessage(from: lineData, fallbackID: UUID().uuidString),
                parsed.message.role == .assistant {
-                return (parsed.message.text, parsed.turnID)
+                state.assistantMessage = (parsed.message.text, parsed.turnID)
+            }
+            if state.lifecycle != nil, state.assistantMessage != nil {
+                break
             }
         }
-        return nil
+        return state
     }
 
     private func visibleMessage(

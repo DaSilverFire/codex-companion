@@ -162,6 +162,13 @@ struct CompanionWeatherService: @unchecked Sendable {
             query: locationQuery
         )
 
+        return try await currentWeather(at: location, units: units)
+    }
+
+    func currentWeather(
+        at location: CompanionWeatherLocation,
+        units: CompanionWeatherUnitSystem = .preferred
+    ) async throws -> CompanionWeatherReport {
         let forecastRequest = try makeForecastRequest(location: location, units: units)
         let (forecastData, forecastResponse) = try await session.data(for: forecastRequest)
         return try decodeForecast(

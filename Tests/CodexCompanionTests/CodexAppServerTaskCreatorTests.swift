@@ -73,6 +73,44 @@ struct CodexAppServerTaskCreatorTests {
     }
 
     @Test
+    func turnStartCarriesImageAndFileAttachmentsAsNativeUserInputs() throws {
+        let image = CodexFollowerAttachment(
+            id: UUID(),
+            kind: .image,
+            label: "reference.png",
+            path: "/tmp/reference.png",
+            fsPath: "/tmp/reference.png",
+            mimeType: "image/png"
+        )
+        let file = CodexFollowerAttachment(
+            id: UUID(),
+            kind: .file,
+            label: "design.md",
+            path: "/tmp/design.md",
+            fsPath: "/tmp/design.md",
+            mimeType: "text/markdown"
+        )
+
+        let request = CodexAppServerTaskRequestFactory.turnStart(
+            id: 3,
+            threadID: "thread-new",
+            prompt: "Use these references",
+            clientMessageID: "message-with-attachments",
+            attachments: [image, file]
+        )
+        let params = try #require(request["params"] as? [String: Any])
+        let input = try #require(params["input"] as? [[String: Any]])
+
+        #expect(input.count == 3)
+        #expect(input[1]["type"] as? String == "localImage")
+        #expect(input[1]["path"] as? String == "/tmp/reference.png")
+        #expect(input[2]["type"] as? String == "mention")
+        #expect(input[2]["name"] as? String == "design.md")
+        #expect(input[2]["path"] as? String == "/tmp/design.md")
+        #expect(params["attachments"] == nil)
+    }
+
+    @Test
     func extractsCreatedThreadIDFromNativeResponse() {
         let response: [String: Any] = [
             "id": 2,

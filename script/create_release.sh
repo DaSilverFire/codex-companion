@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ -z "${DEVELOPER_DIR:-}" ]]; then
+  if [[ -d /Applications/Xcode-beta.app/Contents/Developer ]]; then
+    export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer
+  elif [[ -d /Applications/Xcode.app/Contents/Developer ]]; then
+    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+  fi
+fi
+
+export GIT_OPTIONAL_LOCKS="${GIT_OPTIONAL_LOCKS:-0}"
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION_FILE="$ROOT_DIR/VERSION"
 APP_NAME="CodexCompanion"
@@ -12,9 +22,16 @@ X86_64_TRIPLE="x86_64-apple-macosx${MIN_SYSTEM_VERSION}"
 VERSION="${CODEX_COMPANION_VERSION:-$(tr -d '[:space:]' < "$VERSION_FILE")}"
 BUILD_NUMBER="${CODEX_COMPANION_BUILD_NUMBER:-1}"
 OUTPUT_DIR="${CODEX_COMPANION_RELEASE_OUTPUT_DIR:-$ROOT_DIR/dist/release}"
-UPDATE_MANIFEST_URL="${CODEX_COMPANION_UPDATE_MANIFEST_URL:-}"
-UPDATE_PUBLIC_KEY="${CODEX_COMPANION_UPDATE_PUBLIC_KEY:-}"
-UPDATE_DOWNLOAD_URL="${CODEX_COMPANION_UPDATE_DOWNLOAD_URL:-}"
+DEFAULT_UPDATE_MANIFEST_URL="https://github.com/DaSilverFire/codex-companion/releases/latest/download/update.json"
+DEFAULT_UPDATE_PUBLIC_KEY="/b26MOV9HlKeifsp8TCIb3tPDJW5SGBf7o/CE+RooVg="
+UPDATE_MANIFEST_URL="${CODEX_COMPANION_UPDATE_MANIFEST_URL:-$DEFAULT_UPDATE_MANIFEST_URL}"
+UPDATE_PUBLIC_KEY="${CODEX_COMPANION_UPDATE_PUBLIC_KEY:-$DEFAULT_UPDATE_PUBLIC_KEY}"
+RELAY_URL="${CODEX_COMPANION_RELAY_URL:-}"
+UPDATE_DOWNLOAD_URL="${CODEX_COMPANION_UPDATE_DOWNLOAD_URL:-https://github.com/DaSilverFire/codex-companion/releases/download/v$VERSION/Codex-Companion-$VERSION-$BUILD_NUMBER-universal.dmg}"
+UPDATE_PRIVATE_KEY="${CODEX_COMPANION_UPDATE_PRIVATE_KEY_BASE64:-}"
+UPDATE_KEYCHAIN_SERVICE="com.silverfire.codexcompanion.update-signing-key"
+MOBILE_BETA_AUTHORIZED="${CODEX_COMPANION_MOBILE_BETA_AUTHORIZED:-0}"
+MOBILE_BETA_PLIST_BOOL=false
 SIGN_IDENTITY="${CODEX_COMPANION_CODESIGN_IDENTITY:-}"
 NOTARY_PROFILE="${CODEX_COMPANION_NOTARY_PROFILE:-}"
 WORK_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/codex-companion-release.XXXXXX")"
@@ -30,6 +47,13 @@ MANIFEST_PATH="$OUTPUT_DIR/update.json"
 APP_ICON_SOURCE="$ROOT_DIR/Assets/AppIcon/CodexCompanion.icns"
 COMPANION_SKILL_SOURCE="$ROOT_DIR/Skills/companion-pet"
 
+if [[ -z "$UPDATE_PRIVATE_KEY" ]]; then
+  UPDATE_PRIVATE_KEY="$(security find-generic-password -a release -s "$UPDATE_KEYCHAIN_SERVICE" -w 2>/dev/null || true)"
+fi
+if [[ -n "$UPDATE_PRIVATE_KEY" ]]; then
+  export CODEX_COMPANION_UPDATE_PRIVATE_KEY_BASE64="$UPDATE_PRIVATE_KEY"
+fi
+
 cleanup() {
   rm -rf "$WORK_ROOT"
 }
@@ -43,6 +67,8 @@ fail() {
 validate_inputs() {
   [[ "$VERSION" =~ ^[0-9]+([.][0-9]+){1,3}([+-][0-9A-Za-z.-]+)?$ ]] || fail "invalid version: $VERSION"
   [[ "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]] || fail "build number must be a positive integer"
+  [[ "$MOBILE_BETA_AUTHORIZED" == "0" || "$MOBILE_BETA_AUTHORIZED" == "1" ]] \
+    || fail "CODEX_COMPANION_MOBILE_BETA_AUTHORIZED must be 0 or 1"
   [[ -f "$APP_ICON_SOURCE" ]] || fail "missing app icon"
   [[ -f "$COMPANION_SKILL_SOURCE/SKILL.md" ]] || fail "missing Companion pet skill"
   if [[ -n "$UPDATE_MANIFEST_URL" && "$UPDATE_MANIFEST_URL" != https://* ]]; then
@@ -51,7 +77,10 @@ validate_inputs() {
   if [[ -n "$UPDATE_DOWNLOAD_URL" && "$UPDATE_DOWNLOAD_URL" != https://* ]]; then
     fail "update download URL must use HTTPS"
   fi
-  if [[ -n "${CODEX_COMPANION_UPDATE_PRIVATE_KEY_BASE64:-}" && -z "$UPDATE_DOWNLOAD_URL" ]]; then
+  if [[ -n "$RELAY_URL" && "$RELAY_URL" != wss://* ]]; then
+    fail "relay URL must use WSS"
+  fi
+  if [[ -n "$UPDATE_PRIVATE_KEY" && -z "$UPDATE_DOWNLOAD_URL" ]]; then
     fail "CODEX_COMPANION_UPDATE_DOWNLOAD_URL is required when signing a manifest"
   fi
   case "$OUTPUT_DIR" in
@@ -60,6 +89,10 @@ validate_inputs() {
       ;;
   esac
 }
+
+if [[ "$MOBILE_BETA_AUTHORIZED" == "1" ]]; then
+  MOBILE_BETA_PLIST_BOOL=true
+fi
 
 build_architecture() {
   local architecture="$1"
@@ -94,15 +127,33 @@ write_info_plist() {
   /usr/bin/plutil -insert CFBundleVersion -string "$BUILD_NUMBER" "$INFO_PLIST"
   /usr/bin/plutil -insert LSMinimumSystemVersion -string "$MIN_SYSTEM_VERSION" "$INFO_PLIST"
   /usr/bin/plutil -insert LSUIElement -bool true "$INFO_PLIST"
-  /usr/bin/plutil -insert NSBonjourServices -json '["_codex-companion._tcp."]' "$INFO_PLIST"
-  /usr/bin/plutil -insert NSLocalNetworkUsageDescription -string \
-    "Codex Companion connects to Codex Companion Pocket on your local network." "$INFO_PLIST"
+  /usr/bin/plutil -insert CodexCompanionMobileBetaAuthorized -bool "$MOBILE_BETA_PLIST_BOOL" "$INFO_PLIST"
+  if [[ "$MOBILE_BETA_AUTHORIZED" == "1" ]]; then
+    /usr/bin/plutil -insert NSBonjourServices -json '["_codex-companion._tcp."]' "$INFO_PLIST"
+    /usr/bin/plutil -insert NSLocalNetworkUsageDescription -string \
+      "Codex Companion connects to authorized Companion mobile clients on your local network." "$INFO_PLIST"
+  fi
+  /usr/bin/plutil -insert NSLocationUsageDescription -string \
+    "Codex Companion uses your location only when you ask the on-device assistant for a location-aware answer." "$INFO_PLIST"
+  /usr/bin/plutil -insert NSLocationWhenInUseUsageDescription -string \
+    "Codex Companion uses your location only when you ask the on-device assistant for a location-aware answer." "$INFO_PLIST"
+  /usr/bin/plutil -insert NSCalendarsFullAccessUsageDescription -string \
+    "Codex Companion reads upcoming calendar events only when you ask the on-device assistant about your schedule." "$INFO_PLIST"
+  /usr/bin/plutil -insert NSCalendarsUsageDescription -string \
+    "Codex Companion reads upcoming calendar events only when you ask the on-device assistant about your schedule." "$INFO_PLIST"
+  /usr/bin/plutil -insert NSRemindersFullAccessUsageDescription -string \
+    "Codex Companion reads incomplete reminders only when you ask the on-device assistant about them." "$INFO_PLIST"
+  /usr/bin/plutil -insert NSRemindersUsageDescription -string \
+    "Codex Companion reads incomplete reminders only when you ask the on-device assistant about them." "$INFO_PLIST"
   /usr/bin/plutil -insert NSPrincipalClass -string "NSApplication" "$INFO_PLIST"
   if [[ -n "$UPDATE_MANIFEST_URL" ]]; then
     /usr/bin/plutil -insert CodexCompanionUpdateManifestURL -string "$UPDATE_MANIFEST_URL" "$INFO_PLIST"
   fi
   if [[ -n "$UPDATE_PUBLIC_KEY" ]]; then
     /usr/bin/plutil -insert CodexCompanionUpdatePublicKey -string "$UPDATE_PUBLIC_KEY" "$INFO_PLIST"
+  fi
+  if [[ -n "$RELAY_URL" ]]; then
+    /usr/bin/plutil -insert CodexCompanionRelayURL -string "$RELAY_URL" "$INFO_PLIST"
   fi
 }
 
@@ -142,7 +193,7 @@ create_manifest_if_configured() {
   local size="$2"
 
   rm -f "$MANIFEST_PATH"
-  if [[ -z "${CODEX_COMPANION_UPDATE_PRIVATE_KEY_BASE64:-}" ]]; then
+  if [[ -z "$UPDATE_PRIVATE_KEY" ]]; then
     echo "No update private key supplied; update.json was not generated." >&2
     return 0
   fi

@@ -4,7 +4,9 @@ import Foundation
 import PackageDescription
 
 var targets: [Target] = [
-    .executableTarget(name: "CodexCompanion")
+    .executableTarget(
+        name: "CodexCompanion"
+    )
 ]
 
 if FileManager.default.fileExists(atPath: "Tests/CodexCompanionTests") {

@@ -1,6 +1,19 @@
 import Foundation
 import Network
 
+enum CompanionRelayKeepAliveLoop {
+    static func run(
+        intervalNanoseconds: UInt64,
+        ping: @escaping @Sendable () async throws -> Void
+    ) async throws {
+        while true {
+            try await Task.sleep(nanoseconds: intervalNanoseconds)
+            try Task.checkCancellation()
+            try await ping()
+        }
+    }
+}
+
 enum CompanionRelayConnectionError: LocalizedError {
     case notRegistered
     case peerUnavailable
@@ -39,11 +52,13 @@ actor CompanionRelayConnection {
     typealias EnvelopeHandler = @Sendable (CompanionBridgeEncryptedEnvelope) -> Void
     typealias FailureHandler = @Sendable (String) -> Void
     typealias SendOperation = @Sendable (String) async throws -> Void
+    typealias PingOperation = @Sendable () async throws -> Void
 
     private let url: URL
     private let channelID: String
     private let endpointID: String
     private let packetResultTimeoutNanoseconds: UInt64
+    private let keepAliveIntervalNanoseconds: UInt64
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private let stateHandler: StateHandler
@@ -58,7 +73,9 @@ actor CompanionRelayConnection {
     private var connectionGeneration = UUID()
     private var relayRegistrationAcknowledged = false
     private var modernSendOperation: SendOperation?
+    private var modernPingOperation: PingOperation?
     private var runTask: Task<Void, Never>?
+    private var keepAliveTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var pendingPacketResults: [
         String: CheckedContinuation<Void, Error>
@@ -70,22 +87,39 @@ actor CompanionRelayConnection {
         channelID: String,
         endpointID: String,
         packetResultTimeoutNanoseconds: UInt64 = 5_000_000_000,
+        keepAliveIntervalNanoseconds: UInt64 = 20_000_000_000,
         stateHandler: @escaping StateHandler,
         envelopeHandler: @escaping EnvelopeHandler,
         failureHandler: @escaping FailureHandler = { _ in }
     ) {
-        self.url = url
+        self.url = Self.routedURL(url, channelID: channelID)
         self.channelID = channelID
         self.endpointID = endpointID
         self.packetResultTimeoutNanoseconds = max(
             1,
             packetResultTimeoutNanoseconds
         )
+        self.keepAliveIntervalNanoseconds = max(
+            1,
+            keepAliveIntervalNanoseconds
+        )
         self.stateHandler = stateHandler
         self.envelopeHandler = envelopeHandler
         self.failureHandler = failureHandler
         encoder = JSONEncoder()
         decoder = JSONDecoder()
+    }
+
+    static func routedURL(_ url: URL, channelID: String) -> URL {
+        guard var components = URLComponents(
+            url: url,
+            resolvingAgainstBaseURL: false
+        ) else { return url }
+        var queryItems = components.queryItems ?? []
+        queryItems.removeAll { $0.name == "channel" }
+        queryItems.append(URLQueryItem(name: "channel", value: channelID))
+        components.queryItems = queryItems
+        return components.url ?? url
     }
 
     func start() {
@@ -105,9 +139,12 @@ actor CompanionRelayConnection {
         )
         reconnectTask?.cancel()
         reconnectTask = nil
+        keepAliveTask?.cancel()
+        keepAliveTask = nil
         runTask?.cancel()
         runTask = nil
         modernSendOperation = nil
+        modernPingOperation = nil
         connectionGeneration = UUID()
         connection?.stateUpdateHandler = nil
         connection?.cancel()
@@ -140,10 +177,13 @@ actor CompanionRelayConnection {
         guard shouldRun else { return }
         reconnectTask?.cancel()
         reconnectTask = nil
+        keepAliveTask?.cancel()
+        keepAliveTask = nil
         runTask?.cancel()
         runTask = nil
         relayRegistrationAcknowledged = false
         modernSendOperation = nil
+        modernPingOperation = nil
         connectionGeneration = UUID()
         connection?.stateUpdateHandler = nil
         connection?.cancel()
@@ -212,8 +252,9 @@ actor CompanionRelayConnection {
                     to: .url(url),
                     using: { configuredWebSocket }
                 ) { connection in
-                    await self?.installModernSender(
-                        { payload in try await connection.send(payload) },
+                    await self?.installModernTransport(
+                        send: { payload in try await connection.send(payload) },
+                        ping: { try await connection.ping(Data()) },
                         generation: generation
                     )
                     try await connection.send(registration)
@@ -237,12 +278,14 @@ actor CompanionRelayConnection {
         }
     }
 
-    private func installModernSender(
-        _ operation: @escaping SendOperation,
+    private func installModernTransport(
+        send: @escaping SendOperation,
+        ping: @escaping PingOperation,
         generation: UUID
     ) {
         guard shouldRun, generation == connectionGeneration else { return }
-        modernSendOperation = operation
+        modernSendOperation = send
+        modernPingOperation = ping
     }
 
     @available(macOS 26.0, iOS 26.0, *)
@@ -419,6 +462,9 @@ actor CompanionRelayConnection {
         connection?.cancel()
         connection = nil
         modernSendOperation = nil
+        modernPingOperation = nil
+        keepAliveTask?.cancel()
+        keepAliveTask = nil
         runTask?.cancel()
         runTask = nil
         scheduleReconnect()
@@ -434,6 +480,7 @@ actor CompanionRelayConnection {
         case .registered:
             reconnectAttempt = 0
             relayRegistrationAcknowledged = true
+            startKeepAlive(generation: connectionGeneration)
         case .peerPresence:
             guard relayRegistrationAcknowledged,
                   let peerCount = wire.peerCount,
@@ -594,6 +641,68 @@ actor CompanionRelayConnection {
         }
     }
 
+    private func startKeepAlive(generation: UUID) {
+        guard shouldRun,
+              generation == connectionGeneration,
+              relayRegistrationAcknowledged,
+              keepAliveTask == nil
+        else { return }
+
+        let intervalNanoseconds = keepAliveIntervalNanoseconds
+        keepAliveTask = Task { [weak self] in
+            do {
+                try await CompanionRelayKeepAliveLoop.run(
+                    intervalNanoseconds: intervalNanoseconds
+                ) { [weak self] in
+                    guard let self else { throw CancellationError() }
+                    try await self.sendPing(generation: generation)
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                await self?.handleFailure(error, generation: generation)
+            }
+        }
+    }
+
+    private func sendPing(generation: UUID) async throws {
+        guard shouldRun,
+              generation == connectionGeneration,
+              relayRegistrationAcknowledged
+        else { throw CancellationError() }
+
+        if let modernPingOperation {
+            try await modernPingOperation()
+            return
+        }
+        guard let connection else {
+            throw CompanionRelayConnectionError.notRegistered
+        }
+        try await sendPing(through: connection)
+    }
+
+    private func sendPing(through connection: NWConnection) async throws {
+        let metadata = NWProtocolWebSocket.Metadata(opcode: .ping)
+        let context = NWConnection.ContentContext(
+            identifier: "companion-relay-keepalive",
+            metadata: [metadata]
+        )
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
+            connection.send(
+                content: Data(),
+                contentContext: context,
+                isComplete: true,
+                completion: .contentProcessed { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
+                }
+            )
+        }
+    }
+
     private func scheduleReconnect() {
         guard shouldRun else { return }
         publish(.waitingToReconnect)
@@ -622,10 +731,51 @@ actor CompanionRelayConnection {
 
 enum CompanionRelaySettings {
     static let relayURLKey = "CodexCompanion.relayURL.v1"
+    static let remoteAccessDisabledKey = "CodexCompanion.remoteAccessDisabled.v1"
+    static let bundledRelayURLInfoKey = "CodexCompanionRelayURL"
     static let didChange = Notification.Name("CodexCompanion.relaySettingsDidChange")
 
-    static func configuredURL(defaults: UserDefaults = .standard) -> URL? {
-        validatedURL(defaults.string(forKey: relayURLKey))
+    static func configuredURL(
+        defaults: UserDefaults = .standard,
+        bundle: Bundle = .main
+    ) -> URL? {
+        configuredURL(
+            defaults: defaults,
+            bundledURLString: bundle.object(
+                forInfoDictionaryKey: bundledRelayURLInfoKey
+            ) as? String
+        )
+    }
+
+    static func configuredURL(
+        defaults: UserDefaults,
+        bundledURLString: String?
+    ) -> URL? {
+        guard !defaults.bool(forKey: remoteAccessDisabledKey) else { return nil }
+        if let override = validatedURL(defaults.string(forKey: relayURLKey)) {
+            return override
+        }
+        return validatedURL(bundledURLString)
+    }
+
+    static func bundledURL(bundle: Bundle = .main) -> URL? {
+        validatedURL(
+            bundle.object(forInfoDictionaryKey: bundledRelayURLInfoKey) as? String
+        )
+    }
+
+    static func setRemoteAccessEnabled(
+        _ enabled: Bool,
+        defaults: UserDefaults = .standard
+    ) {
+        defaults.set(!enabled, forKey: remoteAccessDisabledKey)
+        NotificationCenter.default.post(name: didChange, object: nil)
+    }
+
+    static func useBundledRelay(defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: relayURLKey)
+        defaults.set(false, forKey: remoteAccessDisabledKey)
+        NotificationCenter.default.post(name: didChange, object: nil)
     }
 
     @discardableResult
@@ -636,11 +786,13 @@ enum CompanionRelaySettings {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             defaults.removeObject(forKey: relayURLKey)
+            defaults.set(true, forKey: remoteAccessDisabledKey)
             NotificationCenter.default.post(name: didChange, object: nil)
             return true
         }
         guard let url = validatedURL(trimmed) else { return false }
         defaults.set(url.absoluteString, forKey: relayURLKey)
+        defaults.set(false, forKey: remoteAccessDisabledKey)
         NotificationCenter.default.post(name: didChange, object: nil)
         return true
     }

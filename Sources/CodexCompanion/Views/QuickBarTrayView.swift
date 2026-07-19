@@ -87,7 +87,7 @@ struct QuickBarTrayView: View {
                     processListContent
                 }
                 .scrollDisabled(!processListNeedsScrolling)
-                .scrollIndicators(processListNeedsScrolling ? .automatic : .never)
+                .scrollIndicators(.never)
                 .onAppear {
                     scrollToRelevantProcess(using: proxy, animated: false)
                 }
