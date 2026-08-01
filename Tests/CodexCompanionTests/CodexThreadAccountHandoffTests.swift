@@ -5,7 +5,20 @@ import Testing
 @Suite
 struct CodexThreadAccountHandoffTests {
     @Test
-    func resumesTheExactPersistedThreadBeforeChangingItsProfileBinding() throws {
+    func accountRuntimeDiagnosticsRedactCredentialValues() {
+        let redacted = CodexAccountRuntimeDiagnostics.redact(
+            #"access_token=secret-access refresh_token:secret-refresh api_key=secret-key sk-proj-secret"#
+        )
+
+        #expect(!redacted.contains("secret-access"))
+        #expect(!redacted.contains("secret-refresh"))
+        #expect(!redacted.contains("secret-key"))
+        #expect(!redacted.contains("sk-proj-secret"))
+        #expect(redacted.contains("<redacted>"))
+    }
+
+    @Test
+    func forksTheExactPersistedThreadIntoTheDestinationProfile() throws {
         let defaultsName = "CodexThreadAccountHandoffTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: defaultsName))
         defer { defaults.removePersistentDomain(forName: defaultsName) }
@@ -14,12 +27,16 @@ struct CodexThreadAccountHandoffTests {
         let rolloutURL = URL(
             fileURLWithPath: "/tmp/sessions/2026/07/26/rollout-thread-main.jsonl"
         )
+        let forkedRolloutURL = URL(
+            fileURLWithPath: "/tmp/sessions/2026/07/26/rollout-thread-fork.jsonl"
+        )
         let rpc = RecordingProfileRPCProvider(
             response: CodexRPCResponse(
                 result: [
                     "thread": [
-                        "id": "thread-main",
-                        "path": rolloutURL.path,
+                        "id": "thread-fork",
+                        "forkedFromId": "thread-main",
+                        "path": forkedRolloutURL.path,
                     ],
                 ],
                 error: nil
@@ -39,16 +56,282 @@ struct CodexThreadAccountHandoffTests {
         )
 
         #expect(result == CodexThreadAccountHandoffResult(
-            threadID: "thread-main",
-            rolloutURL: rolloutURL.standardizedFileURL,
+            threadID: "thread-fork",
+            rolloutURL: forkedRolloutURL.standardizedFileURL,
             profileID: profile.id
         ))
         #expect(rpc.requestedProfileIDs == [profile.id])
-        let request = try #require(rpc.recordedRequests.first)
-        #expect(request.method == "thread/resume")
+        let request = try #require(rpc.recordedRequests.first {
+            $0.method == "thread/fork"
+        })
+        #expect(request.method == "thread/fork")
         #expect(request.params["threadId"] as? String == "thread-main")
-        #expect(request.params["path"] as? String == rolloutURL.standardizedFileURL.path)
-        #expect(bindings.profileID(for: "thread-main") == profile.id)
+        #expect(request.params["excludeTurns"] as? Bool == true)
+        #expect(request.params["deferGoalContinuation"] as? Bool == true)
+        #expect(bindings.profileID(for: "thread-main") == nil)
+        #expect(bindings.profileID(for: "thread-fork") == profile.id)
+    }
+
+    @Test
+    func verifiesTheDestinationRuntimeAccountBeforeForkingTheThread() throws {
+        let defaultsName = "CodexThreadAccountHandoffTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+
+        let profile = CodexAccountProfile(id: UUID(), label: "Backup")
+        let rolloutURL = URL(fileURLWithPath: "/tmp/rollout-thread-main.jsonl")
+        let rpc = RecordingProfileRPCProvider(responsesByMethod: [
+            "account/read": CodexRPCResponse(
+                result: [
+                    "account": [
+                        "type": "chatgpt",
+                        "email": "backup@example.com",
+                        "planType": "pro",
+                    ],
+                    "requiresOpenaiAuth": true,
+                ],
+                error: nil
+            ),
+            "thread/fork": CodexRPCResponse(
+                result: [
+                    "thread": [
+                        "id": "thread-fork",
+                        "forkedFromId": "thread-main",
+                        "path": "/tmp/rollout-thread-fork.jsonl",
+                    ],
+                ],
+                error: nil
+            ),
+        ])
+        let bindings = CodexThreadAccountProfileBindingStore(defaults: defaults)
+        let service = CodexThreadAccountHandoffService(
+            clientProvider: rpc,
+            bindingStore: bindings
+        )
+
+        _ = try service.handoff(
+            threadID: "thread-main",
+            rolloutURL: rolloutURL,
+            hasActiveTurn: false,
+            to: profile
+        )
+
+        #expect(rpc.recordedRequests.map(\.method) == ["account/read", "thread/fork"])
+        let accountRequest = try #require(rpc.recordedRequests.first)
+        #expect(accountRequest.params["refreshToken"] as? Bool == true)
+        #expect(bindings.profileID(for: "thread-main") == nil)
+        #expect(bindings.profileID(for: "thread-fork") == profile.id)
+    }
+
+    @Test
+    func accountVerificationFailureKeepsThePreviousBinding() throws {
+        let defaultsName = "CodexThreadAccountHandoffTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+
+        let originalProfile = CodexAccountProfile(id: UUID(), label: "Main")
+        let destinationProfile = CodexAccountProfile(id: UUID(), label: "Backup")
+        let rolloutURL = URL(fileURLWithPath: "/tmp/rollout-thread-main.jsonl")
+        let rpc = RecordingProfileRPCProvider(responsesByMethod: [
+            "account/read": CodexRPCResponse(
+                result: nil,
+                error: "The destination daemon is signed out."
+            ),
+            "thread/fork": CodexRPCResponse(
+                result: [
+                    "thread": [
+                        "id": "thread-fork",
+                        "forkedFromId": "thread-main",
+                        "path": "/tmp/rollout-thread-fork.jsonl",
+                    ],
+                ],
+                error: nil
+            ),
+        ])
+        let bindings = CodexThreadAccountProfileBindingStore(defaults: defaults)
+        bindings.bind(threadID: "thread-main", to: originalProfile.id)
+        let service = CodexThreadAccountHandoffService(
+            clientProvider: rpc,
+            bindingStore: bindings
+        )
+
+        #expect(throws: CodexThreadAccountHandoffError.server(
+            "The destination daemon is signed out."
+        )) {
+            try service.handoff(
+                threadID: "thread-main",
+                rolloutURL: rolloutURL,
+                hasActiveTurn: false,
+                to: destinationProfile
+            )
+        }
+        #expect(bindings.profileID(for: "thread-main") == originalProfile.id)
+    }
+
+    @Test
+    func destinationDaemonForkFailureKeepsThePreviousBindingAndIdentity() throws {
+        let defaultsName = "CodexThreadAccountHandoffTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+
+        let originalProfile = CodexAccountProfile(id: UUID(), label: "Main")
+        let destinationProfile = CodexAccountProfile(id: UUID(), label: "Backup")
+        let rolloutURL = URL(fileURLWithPath: "/tmp/rollout-thread-main.jsonl")
+        let rpc = RecordingProfileRPCProvider(responsesByMethod: [
+            "account/read": CodexRPCResponse(
+                result: [
+                    "account": [
+                        "type": "chatgpt",
+                        "email": "backup@example.com",
+                        "planType": "pro",
+                    ],
+                    "requiresOpenaiAuth": true,
+                ],
+                error: nil
+            ),
+            "thread/fork": CodexRPCResponse(
+                result: nil,
+                error: "The destination daemon could not fork this task."
+            ),
+        ])
+        let bindings = CodexThreadAccountProfileBindingStore(defaults: defaults)
+        bindings.bind(threadID: "thread-main", to: originalProfile.id)
+        let identities = CodexAccountProfileIdentityStore(defaults: defaults)
+        let service = CodexThreadAccountHandoffService(
+            clientProvider: rpc,
+            bindingStore: bindings,
+            identityStore: identities
+        )
+
+        #expect(throws: CodexThreadAccountHandoffError.server(
+            "The destination daemon could not fork this task."
+        )) {
+            try service.handoff(
+                threadID: "thread-main",
+                rolloutURL: rolloutURL,
+                hasActiveTurn: false,
+                to: destinationProfile
+            )
+        }
+        #expect(rpc.recordedRequests.map(\.method) == ["account/read", "thread/fork"])
+        #expect(bindings.profileID(for: "thread-main") == originalProfile.id)
+        #expect(identities.identity(for: destinationProfile.id) == nil)
+    }
+
+    @Test
+    func mismatchedDaemonIdentityKeepsThePreviousBinding() throws {
+        let defaultsName = "CodexThreadAccountHandoffTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+
+        let originalProfile = CodexAccountProfile(id: UUID(), label: "Main")
+        let destinationProfile = CodexAccountProfile(id: UUID(), label: "Backup")
+        let rolloutURL = URL(fileURLWithPath: "/tmp/rollout-thread-main.jsonl")
+        let rpc = RecordingProfileRPCProvider(responsesByMethod: [
+            "account/read": CodexRPCResponse(
+                result: [
+                    "account": [
+                        "type": "chatgpt",
+                        "email": "wrong@example.com",
+                        "planType": "pro",
+                    ],
+                    "requiresOpenaiAuth": true,
+                ],
+                error: nil
+            ),
+            "thread/fork": CodexRPCResponse(
+                result: [
+                    "thread": [
+                        "id": "thread-fork",
+                        "forkedFromId": "thread-main",
+                        "path": "/tmp/rollout-thread-fork.jsonl",
+                    ],
+                ],
+                error: nil
+            ),
+        ])
+        let bindings = CodexThreadAccountProfileBindingStore(defaults: defaults)
+        bindings.bind(threadID: "thread-main", to: originalProfile.id)
+        let identities = CodexAccountProfileIdentityStore(defaults: defaults)
+        identities.save(
+            CodexAccountProfileIdentity(
+                accountType: "chatgpt",
+                email: "backup@example.com",
+                planType: "pro"
+            ),
+            for: destinationProfile.id
+        )
+        let service = CodexThreadAccountHandoffService(
+            clientProvider: rpc,
+            bindingStore: bindings,
+            identityStore: identities
+        )
+
+        #expect(throws: CodexThreadAccountHandoffError.accountIdentityMismatch) {
+            try service.handoff(
+                threadID: "thread-main",
+                rolloutURL: rolloutURL,
+                hasActiveTurn: false,
+                to: destinationProfile
+            )
+        }
+        #expect(bindings.profileID(for: "thread-main") == originalProfile.id)
+        #expect(rpc.recordedRequests.map(\.method) == ["account/read"])
+    }
+
+    @Test
+    func firstVerifiedDaemonIdentityIsPersistedAfterForkSucceeds() throws {
+        let defaultsName = "CodexThreadAccountHandoffTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+
+        let profile = CodexAccountProfile(id: UUID(), label: "Backup")
+        let rolloutURL = URL(fileURLWithPath: "/tmp/rollout-thread-main.jsonl")
+        let rpc = RecordingProfileRPCProvider(responsesByMethod: [
+            "account/read": CodexRPCResponse(
+                result: [
+                    "account": [
+                        "type": "chatgpt",
+                        "email": "Backup@Example.com",
+                        "planType": "pro",
+                    ],
+                    "requiresOpenaiAuth": true,
+                ],
+                error: nil
+            ),
+            "thread/fork": CodexRPCResponse(
+                result: [
+                    "thread": [
+                        "id": "thread-fork",
+                        "forkedFromId": "thread-main",
+                        "path": "/tmp/rollout-thread-fork.jsonl",
+                    ],
+                ],
+                error: nil
+            ),
+        ])
+        let bindings = CodexThreadAccountProfileBindingStore(defaults: defaults)
+        let identities = CodexAccountProfileIdentityStore(defaults: defaults)
+        let service = CodexThreadAccountHandoffService(
+            clientProvider: rpc,
+            bindingStore: bindings,
+            identityStore: identities
+        )
+
+        _ = try service.handoff(
+            threadID: "thread-main",
+            rolloutURL: rolloutURL,
+            hasActiveTurn: false,
+            to: profile
+        )
+
+        #expect(identities.identity(for: profile.id) == CodexAccountProfileIdentity(
+            accountType: "chatgpt",
+            email: "backup@example.com",
+            planType: "pro"
+        ))
+        #expect(bindings.profileID(for: "thread-main") == nil)
+        #expect(bindings.profileID(for: "thread-fork") == profile.id)
     }
 
     @Test
@@ -80,7 +363,7 @@ struct CodexThreadAccountHandoffTests {
     }
 
     @Test
-    func aMismatchedResumeResponseDoesNotChangeTheExistingBinding() throws {
+    func aMismatchedForkResponseDoesNotChangeTheExistingBinding() throws {
         let defaultsName = "CodexThreadAccountHandoffTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: defaultsName))
         defer { defaults.removePersistentDomain(forName: defaultsName) }
@@ -93,7 +376,8 @@ struct CodexThreadAccountHandoffTests {
                 result: [
                     "thread": [
                         "id": "different-thread",
-                        "path": rolloutURL.path,
+                        "forkedFromId": "another-thread",
+                        "path": "/tmp/rollout-different-thread.jsonl",
                     ],
                 ],
                 error: nil
@@ -106,7 +390,7 @@ struct CodexThreadAccountHandoffTests {
             bindingStore: bindings
         )
 
-        #expect(throws: CodexThreadAccountHandoffError.resumeMismatch) {
+        #expect(throws: CodexThreadAccountHandoffError.forkMismatch) {
             try service.handoff(
                 threadID: "thread-main",
                 rolloutURL: rolloutURL,
@@ -157,12 +441,29 @@ private final class RecordingProfileRPCProvider:
     @unchecked Sendable
 {
     private let lock = NSLock()
-    private let response: CodexRPCResponse
+    private let responsesByMethod: [String: CodexRPCResponse]
     private var requests: [CodexRPCRequest] = []
     private var profileIDs: [UUID] = []
 
     init(response: CodexRPCResponse) {
-        self.response = response
+        responsesByMethod = [
+            "account/read": CodexRPCResponse(
+                result: [
+                    "account": [
+                        "type": "chatgpt",
+                        "email": "profile@example.com",
+                        "planType": "pro",
+                    ],
+                    "requiresOpenaiAuth": true,
+                ],
+                error: nil
+            ),
+            "thread/fork": response,
+        ]
+    }
+
+    init(responsesByMethod: [String: CodexRPCResponse]) {
+        self.responsesByMethod = responsesByMethod
     }
 
     var recordedRequests: [CodexRPCRequest] {
@@ -180,6 +481,8 @@ private final class RecordingProfileRPCProvider:
 
     func perform(_ requests: [CodexRPCRequest]) throws -> [Int: CodexRPCResponse] {
         lock.withLock { self.requests.append(contentsOf: requests) }
-        return Dictionary(uniqueKeysWithValues: requests.map { ($0.id, response) })
+        return Dictionary(uniqueKeysWithValues: requests.compactMap { request in
+            responsesByMethod[request.method].map { (request.id, $0) }
+        })
     }
 }

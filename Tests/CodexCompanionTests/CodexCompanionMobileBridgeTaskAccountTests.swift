@@ -41,6 +41,8 @@ struct CodexCompanionMobileBridgeTaskAccountTests {
         defer { fixture.remove() }
 
         let profile = CodexAccountProfile(id: UUID(), label: "Main")
+        let forkedThreadID = "\(fixture.threadID)-fork"
+        let forkedRolloutURL = fixture.root.appendingPathComponent("forked-task.jsonl")
         let recorder = TaskAccountHandoffRecorder()
         let archive = CodexMobileTaskArchive(
             homeDirectory: fixture.root,
@@ -60,6 +62,48 @@ struct CodexCompanionMobileBridgeTaskAccountTests {
                     profile: selectedProfile
                 )
                 return CodexThreadAccountHandoffResult(
+                    threadID: forkedThreadID,
+                    rolloutURL: forkedRolloutURL,
+                    profileID: selectedProfile.id
+                )
+            }
+        )
+
+        let response = await server.handle(
+            CompanionBridgeRequest(
+                operation: .switchTaskAccount,
+                threadID: fixture.threadID,
+                accountProfileID: profile.id
+            )
+        )
+
+        #expect(response.succeeded)
+        #expect(response.threadID == forkedThreadID)
+        #expect(response.message == "Task continued with Main as a new task.")
+        let invocation = try #require(recorder.invocation)
+        #expect(invocation.threadID == fixture.threadID)
+        #expect(invocation.rolloutURL == fixture.rolloutURL.standardizedFileURL)
+        #expect(invocation.hasActiveTurn == false)
+        #expect(invocation.profile == profile)
+    }
+
+    @Test
+    func destinationMustBeASeparateForkOwnedByTheSelectedAccount() async throws {
+        let fixture = try TaskAccountBridgeFixture()
+        defer { fixture.remove() }
+
+        let profile = CodexAccountProfile(id: UUID(), label: "Main")
+        let archive = CodexMobileTaskArchive(
+            homeDirectory: fixture.root,
+            sqliteExecutableURL: fixture.sqliteURL,
+            readPendingApprovalThreadIDs: { [] }
+        )
+        let server = CodexCompanionMobileBridgeServer(
+            archive: archive,
+            accountProfileProvider: { _ in profile },
+            threadAccountHandoffSubmitter: {
+                threadID, rolloutURL, _, selectedProfile in
+                CodexThreadAccountHandoffResult(
                     threadID: threadID,
                     rolloutURL: rolloutURL,
                     profileID: selectedProfile.id
@@ -75,14 +119,8 @@ struct CodexCompanionMobileBridgeTaskAccountTests {
             )
         )
 
-        #expect(response.succeeded)
-        #expect(response.threadID == fixture.threadID)
-        #expect(response.message == "Task will resume with Main.")
-        let invocation = try #require(recorder.invocation)
-        #expect(invocation.threadID == fixture.threadID)
-        #expect(invocation.rolloutURL == fixture.rolloutURL.standardizedFileURL)
-        #expect(invocation.hasActiveTurn == false)
-        #expect(invocation.profile == profile)
+        #expect(!response.succeeded)
+        #expect(response.errorCode == "account_handoff_mismatch")
     }
 
     @Test

@@ -142,6 +142,151 @@ struct CodexAccountProfileSwitcherTests {
     }
 
     @Test
+    func successfulSignInRefreshesAndVerifiesThePersistentProfileDaemonBeforeReportingSignedIn() async throws {
+        let profile = CodexAccountProfile(id: UUID(), label: "Backup")
+        let recorder = ProfileLoginServiceRecorder()
+        let suiteName = "CodexAccountProfileLoginServiceTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let identities = CodexAccountProfileIdentityStore(defaults: defaults)
+        let service = CodexAccountProfileLoginService(
+            baseURL: FileManager.default.temporaryDirectory,
+            executableProvider: {
+                URL(fileURLWithPath: "/Applications/ChatGPT.app/Contents/Resources/codex")
+            },
+            commandRunner: { command in
+                await recorder.recordLogin(command)
+                return 0
+            },
+            daemonRefresher: { refreshedProfile in
+                await recorder.recordRefresh(refreshedProfile.id)
+            },
+            runtimeIdentityReader: { verifiedProfile in
+                await recorder.recordIdentityRead(verifiedProfile.id)
+                return CodexAccountProfileIdentity(
+                    accountType: "chatgpt",
+                    email: "Backup@Example.com",
+                    planType: "pro"
+                )
+            },
+            identityStore: identities
+        )
+
+        let state = await service.signIn(profile: profile)
+
+        #expect(state == .signedIn)
+        #expect(await recorder.refreshedProfileIDs == [profile.id])
+        #expect(await recorder.loginCommandCount == 1)
+        #expect(await recorder.events == ["login", "refresh", "identity"])
+        #expect(identities.identity(for: profile.id)?.email == "backup@example.com")
+    }
+
+    @Test
+    func daemonRefreshFailureDoesNotReportTheProfileAsSignedIn() async {
+        let profile = CodexAccountProfile(id: UUID(), label: "Backup")
+        let service = CodexAccountProfileLoginService(
+            baseURL: FileManager.default.temporaryDirectory,
+            executableProvider: {
+                URL(fileURLWithPath: "/Applications/ChatGPT.app/Contents/Resources/codex")
+            },
+            commandRunner: { _ in 0 },
+            daemonRefresher: { _ in
+                throw ProfileLoginServiceTestError.refreshFailed
+            },
+            runtimeIdentityReader: { _ in
+                Issue.record("Identity must not be read after daemon refresh fails.")
+                throw ProfileLoginServiceTestError.identityReadFailed
+            }
+        )
+
+        let state = await service.signIn(profile: profile)
+
+        guard case .failed(let message) = state else {
+            Issue.record("A stale profile daemon must not be reported as signed in.")
+            return
+        }
+        #expect(message.contains("refresh failed"))
+    }
+
+    @Test
+    func signInRejectsADaemonAuthenticatedAsAnotherKnownAccount() async throws {
+        let profile = CodexAccountProfile(id: UUID(), label: "Backup")
+        let suiteName = "CodexAccountProfileLoginServiceTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let identities = CodexAccountProfileIdentityStore(defaults: defaults)
+        identities.save(
+            CodexAccountProfileIdentity(
+                accountType: "chatgpt",
+                email: "backup@example.com",
+                planType: "pro"
+            ),
+            for: profile.id
+        )
+        let service = CodexAccountProfileLoginService(
+            baseURL: FileManager.default.temporaryDirectory,
+            executableProvider: {
+                URL(fileURLWithPath: "/Applications/ChatGPT.app/Contents/Resources/codex")
+            },
+            commandRunner: { _ in 0 },
+            daemonRefresher: { _ in },
+            runtimeIdentityReader: { _ in
+                CodexAccountProfileIdentity(
+                    accountType: "chatgpt",
+                    email: "wrong@example.com",
+                    planType: "pro"
+                )
+            },
+            identityStore: identities
+        )
+
+        let state = await service.signIn(profile: profile)
+
+        #expect(state == .failed(
+            "The Codex account service is signed in to a different ChatGPT account than this profile."
+        ))
+        #expect(identities.identity(for: profile.id)?.email == "backup@example.com")
+    }
+
+    @Test
+    func loginStatusDoesNotTreatAReachableMismatchedDaemonAsSignedIn() async throws {
+        let profile = CodexAccountProfile(id: UUID(), label: "Backup")
+        let suiteName = "CodexAccountProfileLoginServiceTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let identities = CodexAccountProfileIdentityStore(defaults: defaults)
+        identities.save(
+            CodexAccountProfileIdentity(
+                accountType: "chatgpt",
+                email: "backup@example.com",
+                planType: "pro"
+            ),
+            for: profile.id
+        )
+        let service = CodexAccountProfileLoginService(
+            baseURL: FileManager.default.temporaryDirectory,
+            executableProvider: {
+                URL(fileURLWithPath: "/Applications/ChatGPT.app/Contents/Resources/codex")
+            },
+            commandRunner: { _ in 0 },
+            runtimeIdentityReader: { _ in
+                CodexAccountProfileIdentity(
+                    accountType: "chatgpt",
+                    email: "wrong@example.com",
+                    planType: "pro"
+                )
+            },
+            identityStore: identities
+        )
+
+        let state = await service.status(for: profile)
+
+        #expect(state == .failed(
+            "The Codex account service is signed in to a different ChatGPT account than this profile."
+        ))
+    }
+
+    @Test
     func profileOwningPersistedTasksCannotBeRemoved() throws {
         let (suiteName, defaults) = try makeDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -175,4 +320,40 @@ private final class ProfileAuthenticationRecorder {
     var statusChecks: [UUID] = []
     var signIns: [UUID] = []
     var selectionChangeCount = 0
+}
+
+private actor ProfileLoginServiceRecorder {
+    private(set) var refreshedProfileIDs: [UUID] = []
+    private(set) var loginCommandCount = 0
+    private(set) var events: [String] = []
+
+    func recordLogin(_ command: CodexAccountProfileLoginCommand) {
+        _ = command
+        loginCommandCount += 1
+        events.append("login")
+    }
+
+    func recordRefresh(_ profileID: UUID) {
+        refreshedProfileIDs.append(profileID)
+        events.append("refresh")
+    }
+
+    func recordIdentityRead(_ profileID: UUID) {
+        _ = profileID
+        events.append("identity")
+    }
+}
+
+private enum ProfileLoginServiceTestError: LocalizedError {
+    case refreshFailed
+    case identityReadFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .refreshFailed:
+            return "Profile daemon refresh failed."
+        case .identityReadFailed:
+            return "Profile identity read failed."
+        }
+    }
 }

@@ -17,7 +17,10 @@ enum CodexThreadAccountHandoffError: Error, Equatable {
     case missingResponse
     case server(String)
     case invalidResponse
-    case resumeMismatch
+    case forkMismatch
+    case destinationBindingConflict
+    case unverifiableAccountIdentity
+    case accountIdentityMismatch
 }
 
 extension CodexThreadAccountHandoffError: LocalizedError {
@@ -35,8 +38,14 @@ extension CodexThreadAccountHandoffError: LocalizedError {
             return message
         case .invalidResponse:
             return "Codex returned an unreadable account handoff response."
-        case .resumeMismatch:
-            return "Codex resumed a different task or rollout, so the account was not changed."
+        case .forkMismatch:
+            return "Codex did not create a separate continuation of this task, so the account was not changed."
+        case .destinationBindingConflict:
+            return "The continued task was already assigned to a different Codex account."
+        case .unverifiableAccountIdentity:
+            return "Codex could not verify which ChatGPT account is active for this profile."
+        case .accountIdentityMismatch:
+            return "The Codex account service is signed in to a different ChatGPT account than this profile."
         }
     }
 }
@@ -198,18 +207,23 @@ enum CodexAccountProfileRuntime {
             ofItemAtPath: daemonHomeURL.path
         )
 
-        let daemonOwnedNames: Set<String> = [
-            "app-server-control",
-            "app-server-daemon",
-            "log",
-            "tmp",
+        let sharedCredentialNames: Set<String> = [
+            ".personality_migration",
+            ".sandbox_migration",
+            "auth.json",
+            "config.toml",
+            "installation_id",
+            "models_cache.json",
+            "packages",
+            "plugins",
+            "skills",
         ]
         let credentialArtifacts = try fileManager.contentsOfDirectory(
             at: credentialHomeURL,
             includingPropertiesForKeys: nil
         )
         for sourceURL in credentialArtifacts
-            where !daemonOwnedNames.contains(sourceURL.lastPathComponent)
+            where sharedCredentialNames.contains(sourceURL.lastPathComponent)
         {
             let destinationURL = daemonHomeURL.appendingPathComponent(
                 sourceURL.lastPathComponent,
@@ -353,6 +367,21 @@ final class CodexThreadAccountProfileBindingStore: @unchecked Sendable {
         }
     }
 
+    @discardableResult
+    func bindIfUnbound(threadID: String, to profileID: UUID) -> UUID? {
+        let normalizedThreadID = threadID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedThreadID.isEmpty else { return nil }
+        return lock.withLock {
+            var bindings = defaults.dictionary(forKey: Self.bindingsKey) as? [String: String] ?? [:]
+            if let existingValue = bindings[normalizedThreadID] {
+                return UUID(uuidString: existingValue)
+            }
+            bindings[normalizedThreadID] = profileID.uuidString
+            defaults.set(bindings, forKey: Self.bindingsKey)
+            return profileID
+        }
+    }
+
     func hasBindings(to profileID: UUID) -> Bool {
         lock.withLock {
             let bindings = defaults.dictionary(forKey: Self.bindingsKey) as? [String: String] ?? [:]
@@ -372,34 +401,139 @@ final class CodexThreadAccountProfileBindingStore: @unchecked Sendable {
 }
 
 enum CodexThreadAccountHandoffRequestFactory {
-    static func resume(
-        id: Int,
-        threadID: String,
-        rolloutURL: URL
-    ) -> CodexRPCRequest {
+    static func accountRead(id: Int) -> CodexRPCRequest {
         CodexRPCRequest(
             id: id,
-            method: "thread/resume",
+            method: "account/read",
+            params: ["refreshToken": true]
+        )
+    }
+
+    static func fork(id: Int, threadID: String) -> CodexRPCRequest {
+        CodexRPCRequest(
+            id: id,
+            method: "thread/fork",
             params: [
                 "threadId": threadID,
-                "path": rolloutURL.standardizedFileURL.path,
+                "excludeTurns": true,
+                "deferGoalContinuation": true,
             ]
         )
+    }
+}
+
+enum CodexAccountProfileIdentityParser {
+    static func identity(from accountReadResult: [String: Any]) -> CodexAccountProfileIdentity? {
+        guard
+            let account = accountReadResult["account"] as? [String: Any],
+            let accountType = account["type"] as? String,
+            accountType.caseInsensitiveCompare("chatgpt") == .orderedSame,
+            let email = account["email"] as? String,
+            !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return nil
+        }
+        return CodexAccountProfileIdentity(
+            accountType: accountType,
+            email: email,
+            planType: account["planType"] as? String
+        )
+    }
+}
+
+struct CodexAccountProfileRuntimeIdentityReader: Sendable {
+    private let clientProvider: any CodexAccountProfileRPCClientProviding
+
+    init(
+        clientProvider: any CodexAccountProfileRPCClientProviding =
+            CodexAccountProfileDaemonRPCClientProvider()
+    ) {
+        self.clientProvider = clientProvider
+    }
+
+    func identity(for profile: CodexAccountProfile) throws -> CodexAccountProfileIdentity {
+        let client = try clientProvider.client(for: profile)
+        let request = CodexThreadAccountHandoffRequestFactory.accountRead(id: 1)
+        let responses = try client.perform([request])
+        guard let response = responses[request.id] else {
+            throw CodexThreadAccountHandoffError.missingResponse
+        }
+        if let error = response.error {
+            throw CodexThreadAccountHandoffError.server(error)
+        }
+        guard
+            let result = response.result,
+            let identity = CodexAccountProfileIdentityParser.identity(from: result)
+        else {
+            throw CodexThreadAccountHandoffError.unverifiableAccountIdentity
+        }
+        return identity
+    }
+}
+
+struct CodexAccountProfileRuntimeVerifier: Sendable {
+    typealias IdentityReader = @Sendable (CodexAccountProfile) async throws
+        -> CodexAccountProfileIdentity
+
+    private let identityStore: CodexAccountProfileIdentityStore
+    private let identityReader: IdentityReader
+
+    init(
+        identityStore: CodexAccountProfileIdentityStore = CodexAccountProfileIdentityStore(),
+        identityReader: @escaping IdentityReader = { profile in
+            try await Task.detached(priority: .userInitiated) {
+                try CodexAccountProfileRuntimeIdentityReader().identity(for: profile)
+            }.value
+        }
+    ) {
+        self.identityStore = identityStore
+        self.identityReader = identityReader
+    }
+
+    func verify(_ profile: CodexAccountProfile) async -> Bool {
+        do {
+            let actualIdentity = try await identityReader(profile)
+            if let expectedIdentity = identityStore.identity(for: profile.id) {
+                guard expectedIdentity.matchesAccount(actualIdentity) else {
+                    CodexAccountRuntimeDiagnostics.append(
+                        "profile=\(profile.id.uuidString) runtime account mismatch"
+                    )
+                    return false
+                }
+            } else {
+                identityStore.save(actualIdentity, for: profile.id)
+            }
+            CodexAccountRuntimeDiagnostics.append(
+                "profile=\(profile.id.uuidString) runtime account verified "
+                    + "account_type=\(actualIdentity.accountType)"
+            )
+            return true
+        } catch {
+            CodexAccountRuntimeDiagnostics.append(
+                "profile=\(profile.id.uuidString) runtime account verification failed "
+                    + "error=\(error.localizedDescription)"
+            )
+            return false
+        }
     }
 }
 
 final class CodexThreadAccountHandoffService: @unchecked Sendable {
     private let clientProvider: any CodexAccountProfileRPCClientProviding
     private let bindingStore: CodexThreadAccountProfileBindingStore
+    private let identityStore: CodexAccountProfileIdentityStore
 
     init(
         clientProvider: any CodexAccountProfileRPCClientProviding =
-            CodexAccountProfileRPCClientProvider(),
+            CodexAccountProfileDaemonRPCClientProvider(),
         bindingStore: CodexThreadAccountProfileBindingStore =
-            CodexThreadAccountProfileBindingStore()
+            CodexThreadAccountProfileBindingStore(),
+        identityStore: CodexAccountProfileIdentityStore =
+            CodexAccountProfileIdentityStore()
     ) {
         self.clientProvider = clientProvider
         self.bindingStore = bindingStore
+        self.identityStore = identityStore
     }
 
     func handoff(
@@ -422,12 +556,48 @@ final class CodexThreadAccountHandoffService: @unchecked Sendable {
             throw CodexThreadAccountHandoffError.invalidRolloutPath
         }
 
-        let request = CodexThreadAccountHandoffRequestFactory.resume(
-            id: 2,
-            threadID: normalizedThreadID,
-            rolloutURL: normalizedRolloutURL
+        CodexAccountRuntimeDiagnostics.append(
+            "handoff begin profile=\(profile.id.uuidString) label=\(profile.label) "
+                + "thread=\(normalizedThreadID) rollout=\(normalizedRolloutURL.path)"
         )
+
         let client = try clientProvider.client(for: profile)
+        let accountRequest = CodexThreadAccountHandoffRequestFactory.accountRead(id: 2)
+        let accountResponses = try client.perform([accountRequest])
+        guard let accountResponse = accountResponses[accountRequest.id] else {
+            throw CodexThreadAccountHandoffError.missingResponse
+        }
+        if let error = accountResponse.error {
+            throw CodexThreadAccountHandoffError.server(error)
+        }
+        guard let accountResult = accountResponse.result else {
+            throw CodexThreadAccountHandoffError.invalidResponse
+        }
+        guard let actualIdentity = CodexAccountProfileIdentityParser.identity(
+            from: accountResult
+        ) else {
+            throw CodexThreadAccountHandoffError.unverifiableAccountIdentity
+        }
+        if let expectedIdentity = identityStore.identity(for: profile.id),
+           !expectedIdentity.matchesAccount(actualIdentity) {
+            CodexAccountRuntimeDiagnostics.append(
+                "profile=\(profile.id.uuidString) account mismatch "
+                    + "expected_type=\(expectedIdentity.accountType) "
+                    + "actual_type=\(actualIdentity.accountType) "
+                    + "email_match=false"
+            )
+            throw CodexThreadAccountHandoffError.accountIdentityMismatch
+        }
+        CodexAccountRuntimeDiagnostics.append(
+            "handoff account verified profile=\(profile.id.uuidString) "
+                + "account_type=\(actualIdentity.accountType) "
+                + "plan=\(actualIdentity.planType ?? "unknown")"
+        )
+
+        let request = CodexThreadAccountHandoffRequestFactory.fork(
+            id: 3,
+            threadID: normalizedThreadID
+        )
         let responses = try client.perform([request])
         guard let response = responses[request.id] else {
             throw CodexThreadAccountHandoffError.missingResponse
@@ -438,28 +608,156 @@ final class CodexThreadAccountHandoffService: @unchecked Sendable {
         guard
             let result = response.result,
             let thread = result["thread"] as? [String: Any],
-            let resumedThreadID = thread["id"] as? String,
-            let resumedPath = thread["path"] as? String
+            let forkedThreadID = thread["id"] as? String,
+            let forkedFromThreadID = thread["forkedFromId"] as? String,
+            let forkedPath = thread["path"] as? String
         else {
             throw CodexThreadAccountHandoffError.invalidResponse
         }
 
-        let normalizedResumedThreadID = resumedThreadID.trimmingCharacters(
+        let normalizedForkedThreadID = forkedThreadID.trimmingCharacters(
             in: .whitespacesAndNewlines
         )
-        let normalizedResumedURL = URL(fileURLWithPath: resumedPath).standardizedFileURL
+        let normalizedForkedFromThreadID = forkedFromThreadID.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let normalizedForkedURL = URL(fileURLWithPath: forkedPath).standardizedFileURL
         guard
-            normalizedResumedThreadID == normalizedThreadID,
-            normalizedResumedURL == normalizedRolloutURL
+            !normalizedForkedThreadID.isEmpty,
+            normalizedForkedThreadID != normalizedThreadID,
+            normalizedForkedFromThreadID == normalizedThreadID,
+            normalizedForkedURL.isFileURL,
+            !normalizedForkedURL.path.isEmpty,
+            normalizedForkedURL != normalizedRolloutURL
         else {
-            throw CodexThreadAccountHandoffError.resumeMismatch
+            throw CodexThreadAccountHandoffError.forkMismatch
         }
 
-        bindingStore.bind(threadID: normalizedThreadID, to: profile.id)
+        let committedProfileID = bindingStore.bindIfUnbound(
+            threadID: normalizedForkedThreadID,
+            to: profile.id
+        )
+        guard committedProfileID == profile.id else {
+            throw CodexThreadAccountHandoffError.destinationBindingConflict
+        }
+        identityStore.save(actualIdentity, for: profile.id)
+        CodexAccountRuntimeDiagnostics.append(
+            "handoff committed profile=\(profile.id.uuidString) "
+                + "source_thread=\(normalizedThreadID) "
+                + "destination_thread=\(normalizedForkedThreadID) "
+                + "destination_rollout=\(normalizedForkedURL.path)"
+        )
         return CodexThreadAccountHandoffResult(
-            threadID: normalizedThreadID,
-            rolloutURL: normalizedRolloutURL,
+            threadID: normalizedForkedThreadID,
+            rolloutURL: normalizedForkedURL,
             profileID: profile.id
+        )
+    }
+
+}
+
+struct CodexAccountProfileDaemonRPCClientProvider: CodexAccountProfileRPCClientProviding {
+    typealias CommandRunner = @Sendable (CodexAccountProfileDaemonCommand) throws -> Int32
+    typealias SocketProbe = @Sendable (URL) -> Bool
+
+    var credentialBaseURL: URL = CodexAccountProfileRuntime.defaultBaseURL
+    var daemonBaseURL: URL = CodexAccountProfileRuntime.defaultDaemonBaseURL
+    var sharedSQLiteHomeURL: URL = CodexAccountProfileRuntime.defaultSharedSQLiteHomeURL
+    var managedStandaloneURL: URL = CodexAccountProfileRuntime.defaultManagedStandaloneURL
+    var executableURLProvider: @Sendable () -> URL? = {
+        WorkspacePaths.codexExecutableURLs.first(where: {
+            FileManager.default.isExecutableFile(atPath: $0.path)
+        })
+    }
+    var commandRunner: CommandRunner = { command in
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.executableURL = command.executableURL
+        process.arguments = command.arguments
+        var environment = ProcessInfo.processInfo.environment
+        command.environmentOverrides.forEach { environment[$0.key] = $0.value }
+        process.environment = environment
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        do {
+            try process.run()
+        } catch {
+            throw CodexAccountProfileDaemonError.launchFailed(error.localizedDescription)
+        }
+        CodexAccountRuntimeDiagnostics.append(
+            "daemon launcher pid=\(process.processIdentifier) executable=\(command.executableURL.path) "
+                + "arguments=\(command.arguments.joined(separator: " "))"
+        )
+        process.waitUntilExit()
+
+        let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        if let text = String(data: stdout, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !text.isEmpty {
+            CodexAccountRuntimeDiagnostics.append("daemon stdout \(text)")
+        }
+        let stderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        if let text = String(data: stderr, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !text.isEmpty {
+            CodexAccountRuntimeDiagnostics.append("daemon stderr \(text)")
+        }
+        return process.terminationStatus
+    }
+    var socketProbe: SocketProbe = {
+        CodexAccountProfileDaemonCoordinator.socketIsReachable(at: $0)
+    }
+    var startupTimeout: TimeInterval = 5
+    var requestTimeout: TimeInterval = 30
+
+    func client(for profile: CodexAccountProfile) throws -> any CodexAppServerRPCPerforming {
+        guard let executableURL = executableURLProvider() else {
+            throw CodexAccountProfileDaemonError.missingExecutable
+        }
+        try CodexAccountProfileRuntime.prepareDaemonHome(
+            for: profile,
+            daemonBaseURL: daemonBaseURL,
+            credentialBaseURL: credentialBaseURL,
+            managedStandaloneURL: managedStandaloneURL
+        )
+        let command = CodexAccountProfileDaemonCommandFactory.start(
+            profile: profile,
+            executableURL: executableURL,
+            profileBaseURL: daemonBaseURL,
+            sharedSQLiteHomeURL: sharedSQLiteHomeURL
+        )
+        CodexAccountRuntimeDiagnostics.append(
+            "profile=\(profile.id.uuidString) label=\(profile.label) "
+                + "credential_home=\(CodexAccountProfileRuntime.homeURL(for: profile, baseURL: credentialBaseURL).path) "
+                + "daemon_home=\(command.environmentOverrides["CODEX_HOME"] ?? "missing") "
+                + "sqlite_home=\(command.environmentOverrides["CODEX_SQLITE_HOME"] ?? "missing") "
+                + "socket=\(command.socketURL.path) executable=\(command.executableURL.path)"
+        )
+
+        if !socketProbe(command.socketURL) {
+            let status = try commandRunner(command)
+            guard status == 0 || socketProbe(command.socketURL) else {
+                throw CodexAccountProfileDaemonError.startFailed(status)
+            }
+            let deadline = Date().addingTimeInterval(startupTimeout)
+            while !socketProbe(command.socketURL), Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            guard socketProbe(command.socketURL) else {
+                throw CodexAccountProfileDaemonError.socketUnavailable
+            }
+        }
+
+        CodexAccountRuntimeDiagnostics.append(
+            "profile=\(profile.id.uuidString) daemon ready socket=\(command.socketURL.path)"
+        )
+        return CodexAppServerProxyRPCClient(
+            executableURL: command.executableURL,
+            environmentOverrides: command.environmentOverrides,
+            socketURL: command.socketURL,
+            timeout: requestTimeout,
+            logContext: "profile=\(profile.id.uuidString) socket=\(command.socketURL.path)"
         )
     }
 }

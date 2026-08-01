@@ -6,6 +6,71 @@ struct CodexAccountProfile: Codable, Equatable, Identifiable, Sendable {
     var label: String
 }
 
+struct CodexAccountProfileIdentity: Codable, Equatable, Sendable {
+    var accountType: String
+    var email: String
+    var planType: String?
+
+    init(accountType: String, email: String, planType: String?) {
+        self.accountType = accountType.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        self.email = email.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        self.planType = planType?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
+    func matchesAccount(_ other: CodexAccountProfileIdentity) -> Bool {
+        accountType == other.accountType && email == other.email
+    }
+}
+
+final class CodexAccountProfileIdentityStore: @unchecked Sendable {
+    static let identitiesKey = "com.silverfire.codexcompanion.codex-account-profile-identities"
+
+    private let defaults: UserDefaults
+    private let lock = NSLock()
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    func identity(for profileID: UUID) -> CodexAccountProfileIdentity? {
+        lock.withLock {
+            identities()[profileID.uuidString.lowercased()]
+        }
+    }
+
+    func save(_ identity: CodexAccountProfileIdentity, for profileID: UUID) {
+        lock.withLock {
+            var storedIdentities = identities()
+            storedIdentities[profileID.uuidString.lowercased()] = identity
+            guard let data = try? JSONEncoder().encode(storedIdentities) else { return }
+            defaults.set(data, forKey: Self.identitiesKey)
+        }
+    }
+
+    func removeIdentity(for profileID: UUID) {
+        lock.withLock {
+            var storedIdentities = identities()
+            storedIdentities.removeValue(forKey: profileID.uuidString.lowercased())
+            guard let data = try? JSONEncoder().encode(storedIdentities) else { return }
+            defaults.set(data, forKey: Self.identitiesKey)
+        }
+    }
+
+    private func identities() -> [String: CodexAccountProfileIdentity] {
+        defaults.data(forKey: Self.identitiesKey)
+            .flatMap {
+                try? JSONDecoder().decode(
+                    [String: CodexAccountProfileIdentity].self,
+                    from: $0
+                )
+            }
+            ?? [:]
+    }
+}
+
 final class CodexAccountProfileStore {
     static let profilesKey = "com.silverfire.codexcompanion.codex-account-profile-labels"
     static let selectedProfileKey = "com.silverfire.codexcompanion.selected-codex-account-profile"
@@ -141,6 +206,7 @@ enum CodexAccountProfileLoginError: LocalizedError {
     case missingExecutable
     case launchFailed(String)
     case signInFailed(Int32)
+    case accountIdentityMismatch
 
     var errorDescription: String? {
         switch self {
@@ -150,6 +216,8 @@ enum CodexAccountProfileLoginError: LocalizedError {
             return "Codex sign-in could not start: \(message)"
         case .signInFailed(let status):
             return "Codex sign-in ended with status \(status)."
+        case .accountIdentityMismatch:
+            return "The Codex account service is signed in to a different ChatGPT account than this profile."
         }
     }
 }
@@ -157,6 +225,9 @@ enum CodexAccountProfileLoginError: LocalizedError {
 struct CodexAccountProfileLoginService: Sendable {
     typealias ExecutableProvider = @Sendable () -> URL?
     typealias CommandRunner = @Sendable (CodexAccountProfileLoginCommand) async throws -> Int32
+    typealias DaemonRefresher = @Sendable (CodexAccountProfile) async throws -> Void
+    typealias RuntimeIdentityReader = @Sendable (CodexAccountProfile) async throws
+        -> CodexAccountProfileIdentity
 
     var baseURL: URL = CodexAccountProfileRuntime.defaultBaseURL
     var executableProvider: ExecutableProvider = {
@@ -183,6 +254,15 @@ struct CodexAccountProfileLoginService: Sendable {
             return process.terminationStatus
         }.value
     }
+    var daemonRefresher: DaemonRefresher = { profile in
+        _ = try await CodexAccountProfileDaemonCoordinator.shared.restart(for: profile)
+    }
+    var runtimeIdentityReader: RuntimeIdentityReader = { profile in
+        try await Task.detached(priority: .userInitiated) {
+            try CodexAccountProfileRuntimeIdentityReader().identity(for: profile)
+        }.value
+    }
+    var identityStore: CodexAccountProfileIdentityStore = CodexAccountProfileIdentityStore()
 
     func status(for profile: CodexAccountProfile) async -> CodexAccountProfileAuthenticationState {
         do {
@@ -195,7 +275,9 @@ struct CodexAccountProfileLoginService: Sendable {
                     baseURL: baseURL
                 )
             )
-            return exitStatus == 0 ? .signedIn : .signedOut
+            guard exitStatus == 0 else { return .signedOut }
+            try await verifyRuntimeIdentity(for: profile)
+            return .signedIn
         } catch {
             return .failed(Self.errorText(error))
         }
@@ -215,6 +297,8 @@ struct CodexAccountProfileLoginService: Sendable {
             guard exitStatus == 0 else {
                 throw CodexAccountProfileLoginError.signInFailed(exitStatus)
             }
+            try await daemonRefresher(profile)
+            try await verifyRuntimeIdentity(for: profile)
             return .signedIn
         } catch {
             return .failed(Self.errorText(error))
@@ -226,6 +310,21 @@ struct CodexAccountProfileLoginService: Sendable {
             throw CodexAccountProfileLoginError.missingExecutable
         }
         return executableURL
+    }
+
+    private func verifyRuntimeIdentity(for profile: CodexAccountProfile) async throws {
+        let actualIdentity = try await runtimeIdentityReader(profile)
+        if let expectedIdentity = identityStore.identity(for: profile.id),
+           !expectedIdentity.matchesAccount(actualIdentity) {
+            CodexAccountRuntimeDiagnostics.append(
+                "profile=\(profile.id.uuidString) account mismatch "
+                    + "expected_type=\(expectedIdentity.accountType) "
+                    + "actual_type=\(actualIdentity.accountType) "
+                    + "email_match=false"
+            )
+            throw CodexAccountProfileLoginError.accountIdentityMismatch
+        }
+        identityStore.save(actualIdentity, for: profile.id)
     }
 
     private static func errorText(_ error: Error) -> String {

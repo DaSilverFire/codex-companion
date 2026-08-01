@@ -190,6 +190,10 @@ typealias CodexAccountProfileBindingResolver = @Sendable (
     _ threadID: String
 ) -> UUID?
 
+typealias CodexAccountProfileVerifier = @Sendable (
+    _ profile: CodexAccountProfile
+) async -> Bool
+
 typealias CodexAccountProfileSubmitter = @Sendable (
     _ profile: CodexAccountProfile,
     _ prompt: String,
@@ -206,6 +210,7 @@ final class CodexAppServerSender {
     private let submitter: CodexFollowerSubmitter
     private let profileResolver: CodexAccountProfileResolver
     private let profileBindingResolver: CodexAccountProfileBindingResolver
+    private let profileVerifier: CodexAccountProfileVerifier
     private let profileSubmitter: CodexAccountProfileSubmitter
     private let queuedReplySubmitter: CodexQueuedReplySubmitter
     private let resumingSubmitter: CodexResumingSubmitter
@@ -227,6 +232,9 @@ final class CodexAppServerSender {
         },
         profileBindingResolver: @escaping CodexAccountProfileBindingResolver = { threadID in
             CodexThreadAccountProfileBindingStore().profileID(for: threadID)
+        },
+        profileVerifier: @escaping CodexAccountProfileVerifier = { profile in
+            await CodexAccountProfileRuntimeVerifier().verify(profile)
         },
         profileSubmitter: @escaping CodexAccountProfileSubmitter = {
             profile, prompt, threadID, cwd, action, expectedTurnID,
@@ -274,6 +282,7 @@ final class CodexAppServerSender {
         self.submitter = submitter
         self.profileResolver = profileResolver
         self.profileBindingResolver = profileBindingResolver
+        self.profileVerifier = profileVerifier
         self.profileSubmitter = profileSubmitter
         self.queuedReplySubmitter = queuedReplySubmitter
         self.resumingSubmitter = resumingSubmitter
@@ -298,6 +307,12 @@ final class CodexAppServerSender {
             Self.log(
                 "submit profile-proxy action=\(action.logName) thread=\(trimmedThreadID) profile=\(profile.id.uuidString)"
             )
+            guard await profileVerifier(profile) else {
+                Self.log(
+                    "submit refused unverified-profile thread=\(trimmedThreadID) profile=\(profile.id.uuidString)"
+                )
+                return .failed
+            }
             return await profileSubmitter(
                 profile,
                 trimmedPrompt,
@@ -384,6 +399,7 @@ final class CodexAppServerSender {
                 let session = CodexAppServerSession(
                     executableURL: executableURL,
                     environmentOverrides: [:],
+                    socketURL: nil,
                     prompt: prompt,
                     threadID: threadID,
                     cwd: cwd,
@@ -391,6 +407,7 @@ final class CodexAppServerSender {
                     expectedTurnID: expectedTurnID,
                     clientMessageID: clientMessageID,
                     attachments: attachments,
+                    runtimeLogContext: "shared",
                     onQueued: { queuedNotification() },
                     completion: { outcome in
                         continuation.resume(returning: outcome)
@@ -429,6 +446,12 @@ final class CodexAppServerSender {
             )
             return .sharedDaemonUnavailable
         }
+        CodexAccountRuntimeDiagnostics.append(
+            "profile=\(profile.id.uuidString) label=\(profile.label) send route "
+                + "thread=\(threadID) socket=\(command.socketURL.path) "
+                + "daemon_home=\(command.environmentOverrides["CODEX_HOME"] ?? "missing") "
+                + "sqlite_home=\(command.environmentOverrides["CODEX_SQLITE_HOME"] ?? "missing")"
+        )
 
         let handle = CodexAppServerSessionHandle()
         return await withTaskCancellationHandler {
@@ -436,6 +459,7 @@ final class CodexAppServerSender {
                 let session = CodexAppServerSession(
                     executableURL: command.executableURL,
                     environmentOverrides: command.environmentOverrides,
+                    socketURL: command.socketURL,
                     prompt: prompt,
                     threadID: threadID,
                     cwd: cwd,
@@ -443,6 +467,7 @@ final class CodexAppServerSender {
                     expectedTurnID: expectedTurnID,
                     clientMessageID: clientMessageID,
                     attachments: attachments,
+                    runtimeLogContext: "profile=\(profile.id.uuidString) socket=\(command.socketURL.path)",
                     onQueued: { queuedNotification() },
                     completion: { outcome in
                         continuation.resume(returning: outcome)
@@ -517,6 +542,7 @@ private final class CodexAppServerSession {
 
     private let executableURL: URL
     private let environmentOverrides: [String: String]
+    private let socketURL: URL?
     private let prompt: String
     private let threadID: String
     private let cwd: String?
@@ -524,6 +550,7 @@ private final class CodexAppServerSession {
     private let expectedTurnID: String?
     private let clientMessageID: String
     private let attachments: [CodexFollowerAttachment]
+    private let runtimeLogContext: String
     private let onQueued: @Sendable () -> Void
     private let completion: @Sendable (CodexAppServerSendOutcome) -> Void
     private let process = Process()
@@ -544,6 +571,7 @@ private final class CodexAppServerSession {
     init(
         executableURL: URL,
         environmentOverrides: [String: String] = [:],
+        socketURL: URL? = nil,
         prompt: String,
         threadID: String,
         cwd: String?,
@@ -551,11 +579,13 @@ private final class CodexAppServerSession {
         expectedTurnID: String?,
         clientMessageID: String,
         attachments: [CodexFollowerAttachment],
+        runtimeLogContext: String,
         onQueued: @escaping @Sendable () -> Void,
         completion: @escaping @Sendable (CodexAppServerSendOutcome) -> Void
     ) {
         self.executableURL = executableURL
         self.environmentOverrides = environmentOverrides
+        self.socketURL = socketURL
         self.prompt = prompt
         self.threadID = threadID
         self.cwd = cwd
@@ -563,13 +593,14 @@ private final class CodexAppServerSession {
         self.expectedTurnID = expectedTurnID
         self.clientMessageID = clientMessageID
         self.attachments = attachments
+        self.runtimeLogContext = runtimeLogContext
         self.onQueued = onQueued
         self.completion = completion
     }
 
     func start() {
         process.executableURL = executableURL
-        process.arguments = ["app-server", "proxy"]
+        process.arguments = CodexAppServerProxyCommand.arguments(socketURL: socketURL)
         if !environmentOverrides.isEmpty {
             var environment = ProcessInfo.processInfo.environment
             environmentOverrides.forEach { environment[$0.key] = $0.value }
@@ -1047,7 +1078,10 @@ private final class CodexAppServerSession {
     }
 
     private func appendLog(_ message: String) {
-        CodexSendLog.append("app-server-session \(message)")
+        CodexSendLog.append(
+            "app-server-session \(runtimeLogContext) thread=\(threadID) "
+                + CodexAccountRuntimeDiagnostics.redact(message)
+        )
     }
 
     private func schedulePhaseTimeout(

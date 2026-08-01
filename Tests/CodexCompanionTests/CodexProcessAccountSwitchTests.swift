@@ -5,6 +5,27 @@ import Testing
 @Suite
 struct CodexProcessAccountSwitchTests {
     @Test
+    func completedRolloutLifecycleClearsTheActiveTurnImmediately() throws {
+        let rolloutURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rollout-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: rolloutURL) }
+        let lines = [
+            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-live"}}"#,
+            #"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Finished now"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-live"}}}"#,
+            #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-live"}}"#,
+        ]
+        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: rolloutURL)
+
+        let snapshot = CodexProcessStore.latestRolloutSnapshot(
+            fromRolloutPath: rolloutURL.path
+        )
+
+        #expect(snapshot.assistantMessage == "Finished now")
+        #expect(snapshot.lifecycle?.status == .completed)
+        #expect(snapshot.activeTurnID == nil)
+    }
+
+    @Test
     func onlyStoppedPersistedThreadsCanSwitchAccounts() {
         let rolloutPath = "/tmp/session.jsonl"
 
@@ -55,8 +76,8 @@ struct CodexProcessAccountSwitchTests {
                     profile: selectedProfile
                 )
                 return CodexThreadAccountHandoffResult(
-                    threadID: threadID,
-                    rolloutURL: rolloutURL,
+                    threadID: "thread-1-fork",
+                    rolloutURL: URL(fileURLWithPath: "/tmp/task-fork.jsonl"),
                     profileID: selectedProfile.id
                 )
             }
@@ -73,7 +94,7 @@ struct CodexProcessAccountSwitchTests {
         #expect(invocation?.hasActiveTurn == false)
         #expect(invocation?.profile == profile)
         #expect(model.accountHandoffError == nil)
-        #expect(model.status == "Task will resume with Backup.")
+        #expect(model.status == "Task continued with Backup as a new task.")
     }
 
     @Test

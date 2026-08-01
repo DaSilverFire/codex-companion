@@ -19,6 +19,7 @@ typealias CodexApprovalSubmitter = @Sendable (
 
 typealias CodexAccountProfilesProvider = @Sendable () -> [CodexAccountProfile]
 typealias CodexThreadProfileIDProvider = @Sendable (_ threadID: String) -> UUID?
+typealias CodexThreadSourceProfileIDResolver = @Sendable (_ threadID: String) async throws -> UUID
 typealias CodexAccountProfileAuthenticationChecker = @Sendable (
     _ profile: CodexAccountProfile
 ) async -> CodexAccountProfileAuthenticationState
@@ -62,6 +63,7 @@ final class CompanionAppModel: ObservableObject {
     private let codexApprovalSubmitter: CodexApprovalSubmitter
     private let codexAccountProfilesProvider: CodexAccountProfilesProvider
     private let codexThreadProfileIDProvider: CodexThreadProfileIDProvider
+    private let codexThreadSourceProfileIDResolver: CodexThreadSourceProfileIDResolver
     private let codexAccountProfileAuthenticationChecker: CodexAccountProfileAuthenticationChecker
     private let codexAccountProfileUsageReader: CodexAccountProfileUsageReader
     private let codexAccountHandoffSubmitter: CodexAccountHandoffSubmitter
@@ -236,6 +238,12 @@ final class CompanionAppModel: ObservableObject {
         codexThreadProfileIDProvider: @escaping CodexThreadProfileIDProvider = { threadID in
             CodexThreadAccountProfileBindingStore().profileID(for: threadID)
         },
+        codexThreadSourceProfileIDResolver: @escaping CodexThreadSourceProfileIDResolver = {
+            threadID in
+            try await Task.detached(priority: .userInitiated) {
+                try CodexThreadSourceProfileResolver().resolveProfileID(for: threadID)
+            }.value
+        },
         codexAccountProfileAuthenticationChecker: @escaping CodexAccountProfileAuthenticationChecker = { profile in
             await CodexAccountProfileLoginService().status(for: profile)
         },
@@ -282,6 +290,7 @@ final class CompanionAppModel: ObservableObject {
         self.codexApprovalSubmitter = codexApprovalSubmitter
         self.codexAccountProfilesProvider = codexAccountProfilesProvider
         self.codexThreadProfileIDProvider = codexThreadProfileIDProvider
+        self.codexThreadSourceProfileIDResolver = codexThreadSourceProfileIDResolver
         self.codexAccountProfileAuthenticationChecker = codexAccountProfileAuthenticationChecker
         self.codexAccountProfileUsageReader = codexAccountProfileUsageReader
         self.codexAccountHandoffSubmitter = codexAccountHandoffSubmitter
@@ -489,15 +498,26 @@ final class CompanionAppModel: ObservableObject {
             }
 
             do {
-                _ = try await submitter(threadID, rolloutURL, false, profile)
+                let handoff = try await submitter(
+                    threadID,
+                    rolloutURL,
+                    false,
+                    profile
+                )
                 guard isSwitchingAccountForProcessID == item.id else { return }
                 isSwitchingAccountForProcessID = nil
-                status = "\(item.title) will resume with \(profile.label)."
+                status = "\(item.title) continued with \(profile.label) as a new task."
                 accountHandoffFeedback = CodexAccountHandoffFeedback(
                     processID: item.id,
                     message: status,
                     isError: false
                 )
+                CodexSendLog.append(
+                    "manual account handoff source_thread=\(threadID) "
+                        + "destination_thread=\(handoff.threadID) "
+                        + "profile=\(profile.id.uuidString)"
+                )
+                processStore.refresh()
                 objectWillChange.send()
             } catch {
                 guard isSwitchingAccountForProcessID == item.id else { return }
@@ -566,12 +586,32 @@ final class CompanionAppModel: ObservableObject {
         guard automaticallyContinuesGoalsAcrossAccounts else { return }
 
         let profiles = codexAccountProfilesProvider()
-        let sourceProfileID = existingRecord?.sourceProfileID
-            ?? originalItem.threadID.flatMap(codexThreadProfileIDProvider)
         guard
             let eventKey = existingRecord?.eventKey
                 ?? CodexAutomaticGoalContinuationPolicy.eventKey(for: originalItem)
         else {
+            return
+        }
+
+        var sourceProfileID = existingRecord?.sourceProfileID
+            ?? originalItem.threadID.flatMap(codexThreadProfileIDProvider)
+        if sourceProfileID == nil, let threadID = originalItem.threadID {
+            do {
+                sourceProfileID = try await codexThreadSourceProfileIDResolver(threadID)
+            } catch {
+                automaticGoalContinuationStatus =
+                    "Automatic continuation could not identify the task's original Codex account: \(error.localizedDescription)"
+                scheduleAutomaticGoalContinuationRetry(eventKey: eventKey, after: 2 * 60)
+                return
+            }
+        }
+        guard
+            let sourceProfileID,
+            profiles.contains(where: { $0.id == sourceProfileID })
+        else {
+            automaticGoalContinuationStatus =
+                "Automatic continuation could not identify the task's original Codex account."
+            scheduleAutomaticGoalContinuationRetry(eventKey: eventKey, after: 2 * 60)
             return
         }
 
@@ -672,12 +712,13 @@ final class CompanionAppModel: ObservableObject {
             automaticGoalContinuationStatus =
                 "Moving \(currentItem.title) to \(targetProfile.label)..."
             do {
-                _ = try await codexAccountHandoffSubmitter(
+                let handoff = try await codexAccountHandoffSubmitter(
                     threadID,
                     rolloutURL,
                     false,
                     targetProfile
                 )
+                record.threadID = handoff.threadID
                 record.stage = .handedOff
                 automaticGoalContinuationStore.savePending(record)
             } catch {
@@ -816,21 +857,42 @@ final class CompanionAppModel: ObservableObject {
         guard automaticallyContinuesQuotaInterruptedTasksAcrossAccounts else { return }
 
         let profiles = codexAccountProfilesProvider()
-        let sourceProfileID = existingRecord?.sourceProfileID
-            ?? originalItem.threadID.flatMap(codexThreadProfileIDProvider)
+        guard let threadID = originalItem.threadID else {
+            automaticTaskContinuationStatus =
+                "Automatic continuation could not identify the task's original Codex account."
+            return
+        }
+        let candidateRetryKey = automaticTaskCandidateRetryKey(for: originalItem)
+        var sourceProfileID = existingRecord?.sourceProfileID
+            ?? codexThreadProfileIDProvider(threadID)
+        if sourceProfileID == nil {
+            do {
+                sourceProfileID = try await codexThreadSourceProfileIDResolver(threadID)
+            } catch {
+                automaticTaskContinuationStatus =
+                    "Automatic continuation could not identify the task's original Codex account: \(error.localizedDescription)"
+                scheduleAutomaticTaskContinuationRetry(
+                    eventKey: candidateRetryKey,
+                    after: 2 * 60
+                )
+                return
+            }
+        }
         guard
             let sourceProfileID,
-            let sourceProfile = profiles.first(where: { $0.id == sourceProfileID }),
-            let threadID = originalItem.threadID
+            let sourceProfile = profiles.first(where: { $0.id == sourceProfileID })
         else {
             automaticTaskContinuationStatus =
                 "Automatic continuation could not identify the task's original Codex account."
+            scheduleAutomaticTaskContinuationRetry(
+                eventKey: candidateRetryKey,
+                after: 2 * 60
+            )
             return
         }
 
         var record = existingRecord
         var eventKey = existingRecord?.eventKey
-        let candidateRetryKey = automaticTaskCandidateRetryKey(for: originalItem)
 
         if record == nil {
             let sourceUsageResult = await readUsage(for: sourceProfile)
@@ -982,12 +1044,13 @@ final class CompanionAppModel: ObservableObject {
             automaticTaskContinuationStatus =
                 "Moving \(currentItem.title) to \(targetProfile.label)..."
             do {
-                _ = try await codexAccountHandoffSubmitter(
+                let handoff = try await codexAccountHandoffSubmitter(
                     currentThreadID,
                     rolloutURL,
                     false,
                     targetProfile
                 )
+                record.threadID = handoff.threadID
                 record.stage = .handedOff
                 automaticTaskContinuationStore.savePending(record)
             } catch {

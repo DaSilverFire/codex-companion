@@ -928,7 +928,11 @@ final class CodexProcessStore: ObservableObject {
             let goalUpdatedAt = goalStatus == nil
                 ? nil
                 : date(fromMillisecondsString: columns[11])
-            let status = threadStatus(isFresh: isFresh, goalStatus: goalStatus)
+            let status = threadStatus(
+                isFresh: isFresh,
+                goalStatus: goalStatus,
+                lifecycleStatus: rolloutSnapshot.lifecycle?.status
+            )
             let subtitle = threadSubtitle(
                 status: status,
                 goalStatus: goalStatus,
@@ -949,7 +953,7 @@ final class CodexProcessStore: ObservableObject {
                 threadID: columns[0],
                 cwd: cwd.isEmpty ? nil : cwd,
                 rolloutPath: rolloutPath.isEmpty ? nil : rolloutPath,
-                activeTurnID: rolloutSnapshot.turnID,
+                activeTurnID: rolloutSnapshot.activeTurnID,
                 goalID: goalStatus == nil || columns[6].isEmpty ? nil : columns[6],
                 goalObjective: goalStatus == nil || columns[7].isEmpty ? nil : columns[7],
                 goalStatus: goalStatus,
@@ -997,19 +1001,26 @@ final class CodexProcessStore: ObservableObject {
             )
             let rolloutSnapshot = latestRolloutSnapshot(fromRolloutPath: columns[5])
             let fallbackMessage = firstMessage.isEmpty ? (cwd.isEmpty ? title : cwd) : firstMessage
+            let status = threadStatus(
+                isFresh: isFresh,
+                goalStatus: nil,
+                lifecycleStatus: rolloutSnapshot.lifecycle?.status
+            )
             return CodexProcessItem(
                 id: "thread-\(columns[0])",
                 kind: .thread,
                 title: title,
-                subtitle: isFresh ? "Working now" : relativeSubtitle(for: updatedAt, fallback: cwd),
+                subtitle: status == .running
+                    ? "Working now"
+                    : relativeSubtitle(for: updatedAt, fallback: cwd),
                 fullMessage: rolloutSnapshot.assistantMessage ?? fallbackMessage,
                 updatedAt: updatedAt,
                 startedAt: nil,
-                status: isFresh ? .running : .completed,
+                status: status,
                 threadID: columns[0],
                 cwd: cwd.isEmpty ? nil : cwd,
                 rolloutPath: rolloutPath.isEmpty ? nil : rolloutPath,
-                activeTurnID: rolloutSnapshot.turnID,
+                activeTurnID: rolloutSnapshot.activeTurnID,
                 goalID: nil,
                 goalObjective: nil,
                 goalStatus: nil,
@@ -1250,7 +1261,8 @@ final class CodexProcessStore: ObservableObject {
 
     nonisolated private static func threadStatus(
         isFresh: Bool,
-        goalStatus: CodexProcessItem.GoalStatus?
+        goalStatus: CodexProcessItem.GoalStatus?,
+        lifecycleStatus: CodexTaskLifecycleStatus? = nil
     ) -> CodexProcessItem.Status {
         switch goalStatus {
         case .active:
@@ -1260,7 +1272,16 @@ final class CodexProcessStore: ObservableObject {
         case .complete:
             return .completed
         case nil:
-            return isFresh ? .running : .completed
+            switch lifecycleStatus {
+            case .active:
+                return .running
+            case .completed:
+                return .completed
+            case .failed:
+                return .failed
+            case nil:
+                return isFresh ? .running : .completed
+            }
         }
     }
 
@@ -1354,12 +1375,18 @@ final class CodexProcessStore: ObservableObject {
         }
     }
 
-    private struct RolloutSnapshot {
+    struct RolloutSnapshot {
         var assistantMessage: String?
-        var turnID: String?
+        var lifecycle: CodexTaskLifecycleState?
+        var fallbackTurnID: String?
+
+        var activeTurnID: String? {
+            guard let lifecycle else { return fallbackTurnID }
+            return lifecycle.isActive ? lifecycle.turnID : nil
+        }
     }
 
-    nonisolated private static func latestRolloutSnapshot(
+    nonisolated static func latestRolloutSnapshot(
         fromRolloutPath rawPath: String
     ) -> RolloutSnapshot {
         let url = rolloutURL(from: rawPath)
@@ -1394,10 +1421,13 @@ final class CodexProcessStore: ObservableObject {
             if snapshot.assistantMessage == nil {
                 snapshot.assistantMessage = assistantMessage(fromLine: data)
             }
-            if snapshot.turnID == nil {
-                snapshot.turnID = turnID(fromLine: data)
+            if snapshot.lifecycle == nil {
+                snapshot.lifecycle = CodexTaskLifecycleParser.state(from: data)
             }
-            if snapshot.assistantMessage != nil, snapshot.turnID != nil {
+            if snapshot.fallbackTurnID == nil {
+                snapshot.fallbackTurnID = turnID(fromLine: data)
+            }
+            if snapshot.assistantMessage != nil, snapshot.lifecycle != nil {
                 break
             }
         }

@@ -570,20 +570,22 @@ final class CodexCompanionMobileBridgeServer: NSObject {
                 context.hasActiveTurn,
                 profile
             )
-            guard result.threadID == threadID,
+            guard result.threadID != threadID,
+                  !result.threadID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   result.profileID == profile.id,
-                  result.rolloutURL.standardizedFileURL == context.rolloutURL.standardizedFileURL
+                  result.rolloutURL.standardizedFileURL
+                    != context.rolloutURL.standardizedFileURL
             else {
                 return .failure(
                     for: request,
                     code: "account_handoff_mismatch",
-                    message: "Codex resumed a different task or account, so the account was not changed."
+                    message: "Codex did not create the expected destination task, so the account was not changed."
                 )
             }
             return .success(
                 for: request,
-                message: "Task will resume with \(profile.label).",
-                threadID: threadID,
+                message: "Task continued with \(profile.label) as a new task.",
+                threadID: result.threadID,
                 accountProfileID: profile.id,
                 accountProfileLabel: profile.label
             )

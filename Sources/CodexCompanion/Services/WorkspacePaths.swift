@@ -47,7 +47,14 @@ enum WorkspacePaths {
     }
 
     static var codexExecutableURLs: [URL] {
-        codexAppURLs.map { $0.appendingPathComponent("Contents/Resources/codex") } + [
+        [
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".codex", isDirectory: true)
+                .appendingPathComponent("packages", isDirectory: true)
+                .appendingPathComponent("standalone", isDirectory: true)
+                .appendingPathComponent("current", isDirectory: true)
+                .appendingPathComponent("codex"),
+        ] + codexAppURLs.map { $0.appendingPathComponent("Contents/Resources/codex") } + [
             URL(fileURLWithPath: "/opt/homebrew/bin/codex"),
             URL(fileURLWithPath: "/usr/local/bin/codex"),
             URL(fileURLWithPath: "/usr/bin/codex"),

@@ -115,6 +115,7 @@ enum CodexAppServerTaskResponseParser {
 final class CodexAppServerTaskCreator {
     private let selectedProfileProvider: CodexSelectedAccountProfileProvider
     private let profileProvider: CodexAccountProfileProvider
+    private let profileVerifier: CodexAccountProfileVerifier
     private let sharedTaskCreator: CodexSharedTaskCreator
     private let profileTaskCreator: CodexProfileTaskCreator
     private let profileBinder: CodexAccountProfileBinder
@@ -125,6 +126,9 @@ final class CodexAppServerTaskCreator {
         },
         profileProvider: @escaping CodexAccountProfileProvider = { profileID in
             CodexAccountProfileStore().profiles.first { $0.id == profileID }
+        },
+        profileVerifier: @escaping CodexAccountProfileVerifier = { profile in
+            await CodexAccountProfileRuntimeVerifier().verify(profile)
         },
         sharedTaskCreator: @escaping CodexSharedTaskCreator = { request in
             await CodexAppServerTaskCreator.createThroughSharedProxy(request)
@@ -141,6 +145,7 @@ final class CodexAppServerTaskCreator {
     ) {
         self.selectedProfileProvider = selectedProfileProvider
         self.profileProvider = profileProvider
+        self.profileVerifier = profileVerifier
         self.sharedTaskCreator = sharedTaskCreator
         self.profileTaskCreator = profileTaskCreator
         self.profileBinder = profileBinder
@@ -182,6 +187,12 @@ final class CodexAppServerTaskCreator {
         }
 
         if let profile {
+            guard await profileVerifier(profile) else {
+                CodexSendLog.append(
+                    "task-creator refused unverified profile=\(profile.id.uuidString)"
+                )
+                return .failed
+            }
             let outcome = await profileTaskCreator(profile, request)
             if case .created(let threadID) = outcome {
                 profileBinder(threadID, profile.id)
@@ -207,7 +218,8 @@ final class CodexAppServerTaskCreator {
         return await createThroughProxy(
             request,
             executableURL: executableURL,
-            environmentOverrides: [:]
+            environmentOverrides: [:],
+            socketURL: nil
         )
     }
 
@@ -226,18 +238,26 @@ final class CodexAppServerTaskCreator {
             )
             return .sharedDaemonUnavailable
         }
+        CodexAccountRuntimeDiagnostics.append(
+            "task-creator profile=\(profile.id.uuidString) label=\(profile.label) "
+                + "socket=\(command.socketURL.path) "
+                + "daemon_home=\(command.environmentOverrides["CODEX_HOME"] ?? "missing") "
+                + "sqlite_home=\(command.environmentOverrides["CODEX_SQLITE_HOME"] ?? "missing")"
+        )
 
         return await createThroughProxy(
             request,
             executableURL: command.executableURL,
-            environmentOverrides: command.environmentOverrides
+            environmentOverrides: command.environmentOverrides,
+            socketURL: command.socketURL
         )
     }
 
     private static func createThroughProxy(
         _ request: CodexAppServerTaskCreationRequest,
         executableURL: URL,
-        environmentOverrides: [String: String]
+        environmentOverrides: [String: String],
+        socketURL: URL?
     ) async -> CodexAppServerTaskCreationOutcome {
         let handle = CodexAppServerTaskCreationSessionHandle()
         return await withTaskCancellationHandler {
@@ -245,6 +265,7 @@ final class CodexAppServerTaskCreator {
                 let session = CodexAppServerTaskCreationSession(
                     executableURL: executableURL,
                     environmentOverrides: environmentOverrides,
+                    socketURL: socketURL,
                     prompt: request.prompt,
                     cwd: request.cwd,
                     model: request.model,
@@ -278,6 +299,7 @@ private final class CodexAppServerTaskCreationSession {
 
     private let executableURL: URL
     private let environmentOverrides: [String: String]
+    private let socketURL: URL?
     private let prompt: String
     private let cwd: String?
     private let model: String?
@@ -302,6 +324,7 @@ private final class CodexAppServerTaskCreationSession {
     init(
         executableURL: URL,
         environmentOverrides: [String: String] = [:],
+        socketURL: URL? = nil,
         prompt: String,
         cwd: String?,
         model: String?,
@@ -314,6 +337,7 @@ private final class CodexAppServerTaskCreationSession {
     ) {
         self.executableURL = executableURL
         self.environmentOverrides = environmentOverrides
+        self.socketURL = socketURL
         self.prompt = prompt
         self.cwd = cwd
         self.model = model
@@ -327,7 +351,7 @@ private final class CodexAppServerTaskCreationSession {
 
     func start() {
         process.executableURL = executableURL
-        process.arguments = ["app-server", "proxy"]
+        process.arguments = CodexAppServerProxyCommand.arguments(socketURL: socketURL)
         if !environmentOverrides.isEmpty {
             var environment = ProcessInfo.processInfo.environment
             environmentOverrides.forEach { environment[$0.key] = $0.value }
@@ -346,7 +370,11 @@ private final class CodexAppServerTaskCreationSession {
             guard !data.isEmpty else { return }
             let detail = String(decoding: data, as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            self?.queue.async { CodexSendLog.append("task-creator stderr \(detail)") }
+            self?.queue.async {
+                CodexSendLog.append(
+                    "task-creator stderr \(CodexAccountRuntimeDiagnostics.redact(detail))"
+                )
+            }
         }
         process.terminationHandler = { [weak self] process in
             self?.queue.async { [weak self] in
@@ -429,7 +457,10 @@ private final class CodexAppServerTaskCreationSession {
             let message = raw as? [String: Any]
         else { return }
         if let error = message["error"] {
-            CodexSendLog.append("task-creator server error \(String(describing: error))")
+            CodexSendLog.append(
+                "task-creator server error "
+                    + CodexAccountRuntimeDiagnostics.redact(String(describing: error))
+            )
             finish(.failed)
             terminate()
             return

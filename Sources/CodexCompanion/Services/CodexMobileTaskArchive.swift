@@ -84,20 +84,7 @@ struct CodexMobileTaskArchive: Sendable {
         var item: CompanionBridgeTimelineItem
     }
 
-    private enum TaskLifecycleStatus {
-        case active
-        case completed
-        case failed
-    }
-
-    private struct TaskLifecycleState {
-        var status: TaskLifecycleStatus
-        var turnID: String?
-
-        var isActive: Bool {
-            status == .active
-        }
-    }
+    private typealias TaskLifecycleState = CodexTaskLifecycleState
 
     private struct LatestTaskRolloutState {
         var assistantMessage: (text: String, turnID: String?)?
@@ -810,24 +797,8 @@ struct CodexMobileTaskArchive: Sendable {
     }
 
     private func taskLifecycleState(from data: Data) -> TaskLifecycleState? {
-        guard data.count <= Self.maximumLineSize,
-              let raw = try? JSONSerialization.jsonObject(with: data),
-              let root = raw as? [String: Any],
-              root["type"] as? String == "event_msg",
-              let payload = root["payload"] as? [String: Any],
-              let type = payload["type"] as? String
-        else { return nil }
-        let turnID = payload["turn_id"] as? String
-        switch type {
-        case "task_started", "turn_started":
-            return TaskLifecycleState(status: .active, turnID: turnID)
-        case "task_complete", "task_completed", "turn_complete", "turn_completed":
-            return TaskLifecycleState(status: .completed, turnID: turnID)
-        case "task_aborted", "task_failed", "turn_aborted", "turn_failed":
-            return TaskLifecycleState(status: .failed, turnID: turnID)
-        default:
-            return nil
-        }
+        guard data.count <= Self.maximumLineSize else { return nil }
+        return CodexTaskLifecycleParser.state(from: data)
     }
 
     private func shouldMarkLatestReasoningActive(

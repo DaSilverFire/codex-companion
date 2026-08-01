@@ -161,7 +161,7 @@ struct CodexAutomaticTaskContinuationTests {
         let source = CodexAccountProfile(id: UUID(), label: "Main")
         let target = CodexAccountProfile(id: UUID(), label: "Backup")
         let third = CodexAccountProfile(id: UUID(), label: "Third")
-        let binding = TaskContinuationProfileBinding(source.id)
+        let binding = TaskContinuationProfileBinding(nil)
         let handoffRecorder = TaskContinuationHandoffRecorder(binding: binding)
         let sendRecorder = TaskContinuationSendRecorder()
         let inspectionRecorder = TaskContinuationInspectionRecorder(
@@ -192,6 +192,10 @@ struct CodexAutomaticTaskContinuationTests {
             },
             codexAccountProfilesProvider: { [source, target, third] },
             codexThreadProfileIDProvider: { _ in binding.value },
+            codexThreadSourceProfileIDResolver: { _ in
+                binding.set(source.id)
+                return source.id
+            },
             codexAccountProfileAuthenticationChecker: { _ in .signedIn },
             codexAccountProfileUsageReader: { profile in
                 try Self.usageSnapshot(
@@ -209,8 +213,8 @@ struct CodexAutomaticTaskContinuationTests {
                     profile: profile
                 )
                 return CodexThreadAccountHandoffResult(
-                    threadID: threadID,
-                    rolloutURL: rolloutURL,
+                    threadID: "thread-1-fork",
+                    rolloutURL: URL(fileURLWithPath: "/tmp/thread-1-fork.jsonl"),
                     profileID: profile.id
                 )
             },
@@ -240,7 +244,7 @@ struct CodexAutomaticTaskContinuationTests {
         let sends = await sendRecorder.invocations
         #expect(sends.count == 1)
         #expect(sends.first?.prompt == "continue")
-        #expect(sends.first?.threadID == "thread-1")
+        #expect(sends.first?.threadID == "thread-1-fork")
         #expect(sends.first?.cwd == "/tmp/project")
         #expect(sends.first?.action == .reply)
         #expect(sends.first?.expectedTurnID == nil)
