@@ -5,6 +5,14 @@ import Testing
 @Suite
 struct CodexCompanionMobileBridgeHistoryTests {
     @Test
+    func bridgeRequestsTheFullSubagentHistoryWindow() {
+        #expect(
+            CodexCompanionMobileBridgeServer.subagentHistoryLimit
+                == CompanionBridgeProtocol.maximumPageSize
+        )
+    }
+
+    @Test
     func duplicateHistoryRequestsShareOneArchiveLoadAndPreserveResponseIDs() async throws {
         let fixture = try HistoryBridgeFixture()
         defer { fixture.remove() }

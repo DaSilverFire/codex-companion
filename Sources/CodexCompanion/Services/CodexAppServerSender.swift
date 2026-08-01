@@ -25,9 +25,15 @@ enum CodexAppServerThreadState: Equatable, Sendable {
     case unavailable
 }
 
+enum CodexAppServerLoadedThreadState: Equatable, Sendable {
+    case loaded
+    case needsResume
+}
+
 enum CodexAppServerRequestPolicy {
     static let turnItemsView = "notLoaded"
     static let turnDiscoveryTimeoutSeconds = 30
+    static let threadResumeTimeoutSeconds = 30
 
     static func requiresTurnDiscovery(before action: CodexSendAction) -> Bool {
         switch action {
@@ -37,7 +43,50 @@ enum CodexAppServerRequestPolicy {
     }
 }
 
+enum CodexAppServerLoadedThreadNextStep: Equatable, Sendable {
+    case discoverCurrentTurn
+    case startTurn
+}
+
+enum CodexAppServerLoadedThreadRoutePlanner {
+    static func nextStep(
+        action: CodexSendAction,
+        snapshotTurnID: String?
+    ) -> CodexAppServerLoadedThreadNextStep {
+        // A turn captured before an unloaded task resumes may no longer be current.
+        _ = snapshotTurnID
+        return CodexAppServerRequestPolicy.requiresTurnDiscovery(before: action)
+            ? .discoverCurrentTurn
+            : .startTurn
+    }
+}
+
 struct CodexAppServerResponseParser {
+    static func loadedThreadState(
+        from message: [String: Any],
+        threadID: String
+    ) -> CodexAppServerLoadedThreadState? {
+        guard
+            let result = message["result"] as? [String: Any],
+            let threadIDs = result["data"] as? [String]
+        else {
+            return nil
+        }
+        return threadIDs.contains(threadID) ? .loaded : .needsResume
+    }
+
+    static func resumedThreadID(from message: [String: Any]) -> String? {
+        guard
+            let result = message["result"] as? [String: Any],
+            let thread = result["thread"] as? [String: Any],
+            let threadID = thread["id"] as? String
+        else {
+            return nil
+        }
+        let trimmed = threadID.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     static func turnsListState(from message: [String: Any]) -> CodexAppServerTurnsListState? {
         guard
             let result = message["result"] as? [String: Any],
@@ -74,6 +123,23 @@ struct CodexAppServerResponseParser {
     }
 }
 
+enum CodexAppServerResumeRequestFactory {
+    static func threadResume(id: Int, threadID: String, cwd: String?) -> [String: Any] {
+        var params: [String: Any] = [
+            "threadId": threadID,
+            "excludeTurns": true,
+        ]
+        if let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines), !cwd.isEmpty {
+            params["cwd"] = cwd
+        }
+        return [
+            "id": id,
+            "method": "thread/resume",
+            "params": params,
+        ]
+    }
+}
+
 typealias CodexFollowerSubmitter = @Sendable (
     _ prompt: String,
     _ threadID: String,
@@ -105,9 +171,44 @@ typealias CodexQueuedReplySubmitter = @Sendable (
     _ attachments: [CodexFollowerAttachment]
 ) async -> CodexAppServerSendOutcome
 
+typealias CodexResumingSubmitter = @Sendable (
+    _ prompt: String,
+    _ threadID: String,
+    _ cwd: String?,
+    _ action: CodexSendAction,
+    _ expectedTurnID: String?,
+    _ clientMessageID: String,
+    _ queuedNotification: CodexQueuedReplyNotification,
+    _ attachments: [CodexFollowerAttachment]
+) async -> CodexAppServerSendOutcome
+
+typealias CodexAccountProfileResolver = @Sendable (
+    _ threadID: String
+) -> CodexAccountProfile?
+
+typealias CodexAccountProfileBindingResolver = @Sendable (
+    _ threadID: String
+) -> UUID?
+
+typealias CodexAccountProfileSubmitter = @Sendable (
+    _ profile: CodexAccountProfile,
+    _ prompt: String,
+    _ threadID: String,
+    _ cwd: String?,
+    _ action: CodexSendAction,
+    _ expectedTurnID: String?,
+    _ clientMessageID: String,
+    _ queuedNotification: CodexQueuedReplyNotification,
+    _ attachments: [CodexFollowerAttachment]
+) async -> CodexAppServerSendOutcome
+
 final class CodexAppServerSender {
     private let submitter: CodexFollowerSubmitter
+    private let profileResolver: CodexAccountProfileResolver
+    private let profileBindingResolver: CodexAccountProfileBindingResolver
+    private let profileSubmitter: CodexAccountProfileSubmitter
     private let queuedReplySubmitter: CodexQueuedReplySubmitter
+    private let resumingSubmitter: CodexResumingSubmitter
 
     init(
         submitter: @escaping CodexFollowerSubmitter = {
@@ -118,6 +219,27 @@ final class CodexAppServerSender {
                 action: action,
                 clientMessageID: clientMessageID,
                 cwd: cwd,
+                attachments: attachments
+            )
+        },
+        profileResolver: @escaping CodexAccountProfileResolver = { threadID in
+            CodexAccountProfileRouteResolver().profile(for: threadID)
+        },
+        profileBindingResolver: @escaping CodexAccountProfileBindingResolver = { threadID in
+            CodexThreadAccountProfileBindingStore().profileID(for: threadID)
+        },
+        profileSubmitter: @escaping CodexAccountProfileSubmitter = {
+            profile, prompt, threadID, cwd, action, expectedTurnID,
+            clientMessageID, queuedNotification, attachments in
+            await CodexAppServerSender.submitThroughProfileProxy(
+                profile: profile,
+                prompt: prompt,
+                threadID: threadID,
+                cwd: cwd,
+                action: action,
+                expectedTurnID: expectedTurnID,
+                clientMessageID: clientMessageID,
+                queuedNotification: queuedNotification,
                 attachments: attachments
             )
         },
@@ -134,10 +256,27 @@ final class CodexAppServerSender {
                 queuedNotification()
             }
             return outcome
+        },
+        resumingSubmitter: @escaping CodexResumingSubmitter = {
+            prompt, threadID, cwd, action, expectedTurnID, clientMessageID, queuedNotification, attachments in
+            await CodexAppServerSender.submitThroughSharedProxy(
+                prompt: prompt,
+                threadID: threadID,
+                cwd: cwd,
+                action: action,
+                expectedTurnID: expectedTurnID,
+                clientMessageID: clientMessageID,
+                queuedNotification: queuedNotification,
+                attachments: attachments
+            )
         }
     ) {
         self.submitter = submitter
+        self.profileResolver = profileResolver
+        self.profileBindingResolver = profileBindingResolver
+        self.profileSubmitter = profileSubmitter
         self.queuedReplySubmitter = queuedReplySubmitter
+        self.resumingSubmitter = resumingSubmitter
     }
 
     func submit(
@@ -154,27 +293,50 @@ final class CodexAppServerSender {
         let trimmedThreadID = threadID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPrompt.isEmpty, !trimmedThreadID.isEmpty else { return .failed }
 
+        let queuedNotification = CodexQueuedReplyNotification(onQueued)
+        if let profile = profileResolver(trimmedThreadID) {
+            Self.log(
+                "submit profile-proxy action=\(action.logName) thread=\(trimmedThreadID) profile=\(profile.id.uuidString)"
+            )
+            return await profileSubmitter(
+                profile,
+                trimmedPrompt,
+                trimmedThreadID,
+                cwd,
+                action,
+                expectedTurnID,
+                clientMessageID,
+                queuedNotification,
+                attachments
+            )
+        }
+        if let missingProfileID = profileBindingResolver(trimmedThreadID) {
+            Self.log(
+                "submit refused missing-profile thread=\(trimmedThreadID) profile=\(missingProfileID.uuidString)"
+            )
+            return .failed
+        }
+        let initialOutcome: CodexAppServerSendOutcome
         switch action {
         case .reply:
             Self.log("submit queued-reply thread=\(trimmedThreadID)")
-            let outcome = await queuedReplySubmitter(
+            initialOutcome = await queuedReplySubmitter(
                 trimmedPrompt,
                 trimmedThreadID,
                 cwd,
                 expectedTurnID,
                 clientMessageID,
-                CodexQueuedReplyNotification(onQueued),
+                queuedNotification,
                 attachments
             )
             Self.log(
-                "queued-reply finished thread=\(trimmedThreadID) outcome=\(String(describing: outcome))"
+                "queued-reply finished thread=\(trimmedThreadID) outcome=\(String(describing: initialOutcome))"
             )
-            return outcome
         case .steer:
             Self.log(
                 "submit native-ipc action=\(action.logName) thread=\(trimmedThreadID) socket=\(CodexFollowerIPCProtocol.socketURL.path)"
             )
-            let outcome = await submitter(
+            initialOutcome = await submitter(
                 trimmedPrompt,
                 trimmedThreadID,
                 action,
@@ -183,22 +345,36 @@ final class CodexAppServerSender {
                 attachments
             )
             Self.log(
-                "native-ipc finished action=\(action.logName) thread=\(trimmedThreadID) outcome=\(String(describing: outcome))"
+                "native-ipc finished action=\(action.logName) thread=\(trimmedThreadID) outcome=\(String(describing: initialOutcome))"
             )
-            return outcome
         }
+
+        guard initialOutcome == .threadNotLoaded else { return initialOutcome }
+        Self.log("target thread unloaded; resuming through shared proxy thread=\(trimmedThreadID)")
+        return await resumingSubmitter(
+            trimmedPrompt,
+            trimmedThreadID,
+            cwd,
+            action,
+            expectedTurnID,
+            clientMessageID,
+            queuedNotification,
+            attachments
+        )
     }
 
-    private static func submitQueuedReply(
+    private static func submitThroughSharedProxy(
         prompt: String,
         threadID: String,
         cwd: String?,
+        action: CodexSendAction,
         expectedTurnID: String?,
         clientMessageID: String,
-        queuedNotification: CodexQueuedReplyNotification
+        queuedNotification: CodexQueuedReplyNotification,
+        attachments: [CodexFollowerAttachment]
     ) async -> CodexAppServerSendOutcome {
         guard let executableURL = runningCodexExecutableURL() else {
-            log("queued-reply failed: no running ChatGPT Codex executable")
+            log("resume fallback failed: no running ChatGPT Codex executable")
             return .sharedDaemonUnavailable
         }
 
@@ -207,12 +383,66 @@ final class CodexAppServerSender {
             await withCheckedContinuation { continuation in
                 let session = CodexAppServerSession(
                     executableURL: executableURL,
+                    environmentOverrides: [:],
                     prompt: prompt,
                     threadID: threadID,
                     cwd: cwd,
-                    action: .reply,
+                    action: action,
                     expectedTurnID: expectedTurnID,
                     clientMessageID: clientMessageID,
+                    attachments: attachments,
+                    onQueued: { queuedNotification() },
+                    completion: { outcome in
+                        continuation.resume(returning: outcome)
+                    }
+                )
+                guard handle.install(session) else {
+                    continuation.resume(returning: .failed)
+                    return
+                }
+                session.start()
+            }
+        } onCancel: {
+            handle.cancel()
+        }
+    }
+
+    private static func submitThroughProfileProxy(
+        profile: CodexAccountProfile,
+        prompt: String,
+        threadID: String,
+        cwd: String?,
+        action: CodexSendAction,
+        expectedTurnID: String?,
+        clientMessageID: String,
+        queuedNotification: CodexQueuedReplyNotification,
+        attachments: [CodexFollowerAttachment]
+    ) async -> CodexAppServerSendOutcome {
+        let command: CodexAccountProfileDaemonCommand
+        do {
+            command = try await CodexAccountProfileDaemonCoordinator.shared.ensureRunning(
+                for: profile
+            )
+        } catch {
+            log(
+                "profile daemon unavailable profile=\(profile.id.uuidString) error=\(error.localizedDescription)"
+            )
+            return .sharedDaemonUnavailable
+        }
+
+        let handle = CodexAppServerSessionHandle()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let session = CodexAppServerSession(
+                    executableURL: command.executableURL,
+                    environmentOverrides: command.environmentOverrides,
+                    prompt: prompt,
+                    threadID: threadID,
+                    cwd: cwd,
+                    action: action,
+                    expectedTurnID: expectedTurnID,
+                    clientMessageID: clientMessageID,
+                    attachments: attachments,
                     onQueued: { queuedNotification() },
                     completion: { outcome in
                         continuation.resume(returning: outcome)
@@ -282,15 +512,18 @@ private final class CodexAppServerSession {
         static let recentTurns = 3
         static let sendAction = 4
         static let pendingTurnStartRecheck = 5
+        static let resumeThread = 6
     }
 
     private let executableURL: URL
+    private let environmentOverrides: [String: String]
     private let prompt: String
     private let threadID: String
     private let cwd: String?
     private let action: CodexSendAction
     private let expectedTurnID: String?
     private let clientMessageID: String
+    private let attachments: [CodexFollowerAttachment]
     private let onQueued: @Sendable () -> Void
     private let completion: @Sendable (CodexAppServerSendOutcome) -> Void
     private let process = Process()
@@ -310,22 +543,26 @@ private final class CodexAppServerSession {
 
     init(
         executableURL: URL,
+        environmentOverrides: [String: String] = [:],
         prompt: String,
         threadID: String,
         cwd: String?,
         action: CodexSendAction,
         expectedTurnID: String?,
         clientMessageID: String,
+        attachments: [CodexFollowerAttachment],
         onQueued: @escaping @Sendable () -> Void,
         completion: @escaping @Sendable (CodexAppServerSendOutcome) -> Void
     ) {
         self.executableURL = executableURL
+        self.environmentOverrides = environmentOverrides
         self.prompt = prompt
         self.threadID = threadID
         self.cwd = cwd
         self.action = action
         self.expectedTurnID = expectedTurnID
         self.clientMessageID = clientMessageID
+        self.attachments = attachments
         self.onQueued = onQueued
         self.completion = completion
     }
@@ -333,6 +570,11 @@ private final class CodexAppServerSession {
     func start() {
         process.executableURL = executableURL
         process.arguments = ["app-server", "proxy"]
+        if !environmentOverrides.isEmpty {
+            var environment = ProcessInfo.processInfo.environment
+            environmentOverrides.forEach { environment[$0.key] = $0.value }
+            process.environment = environment
+        }
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
@@ -466,31 +708,29 @@ private final class CodexAppServerSession {
             send(["method": "initialized"])
             requestLoadedThreads()
         case RequestID.loadedThreads:
-            let loadedThreadIDs = loadedThreadIDs(from: message)
-            guard !loadedThreadIDs.isEmpty else {
-                appendLog("shared daemon has no ChatGPT-loaded threads")
-                finish(outcome: .sharedDaemonUnavailable)
+            guard let loadedThreadState = CodexAppServerResponseParser.loadedThreadState(
+                from: message,
+                threadID: threadID
+            ) else {
+                appendLog("loaded-thread discovery response was malformed")
+                finish(outcome: .failed)
                 terminate()
                 return
             }
-            guard loadedThreadIDs.contains(threadID) else {
-                appendLog("target thread is not loaded by the shared ChatGPT app-server")
+            if loadedThreadState == .loaded {
+                routeLoadedThread()
+            } else {
+                requestThreadResume()
+            }
+        case RequestID.resumeThread:
+            guard CodexAppServerResponseParser.resumedThreadID(from: message) == threadID else {
+                appendLog("thread/resume returned a different or malformed thread")
                 finish(outcome: .threadNotLoaded)
                 terminate()
                 return
             }
-            if action == .steer, let expectedTurnID {
-                appendLog("using rollout turn id \(expectedTurnID)")
-                steerTurn(expectedTurnID: expectedTurnID)
-            } else if CodexAppServerRequestPolicy.requiresTurnDiscovery(before: action) {
-                schedulePhaseTimeout(
-                    message: "turn discovery timed out",
-                    after: .seconds(CodexAppServerRequestPolicy.turnDiscoveryTimeoutSeconds)
-                )
-                requestRecentTurns(id: RequestID.recentTurns)
-            } else {
-                startTurn()
-            }
+            appendLog("target thread resumed")
+            routeLoadedThread()
         case RequestID.recentTurns:
             routeInitialAction(from: message)
         case RequestID.sendAction:
@@ -549,6 +789,22 @@ private final class CodexAppServerSession {
         }
     }
 
+    private func routeLoadedThread() {
+        switch CodexAppServerLoadedThreadRoutePlanner.nextStep(
+            action: action,
+            snapshotTurnID: expectedTurnID
+        ) {
+        case .discoverCurrentTurn:
+            schedulePhaseTimeout(
+                message: "turn discovery timed out",
+                after: .seconds(CodexAppServerRequestPolicy.turnDiscoveryTimeoutSeconds)
+            )
+            requestRecentTurns(id: RequestID.recentTurns)
+        case .startTurn:
+            startTurn()
+        }
+    }
+
     private func handleNotification(method: String, message: [String: Any]) {
         guard pendingTurnStart != nil, notificationMatchesTargetThread(message) else { return }
         switch method {
@@ -567,6 +823,15 @@ private final class CodexAppServerSession {
         appendLog("error id=\(requestID.map(String.init) ?? "nil") \(String(describing: error))")
 
         let message = errorMessage(error)
+        if requestID == RequestID.resumeThread {
+            let missingThreadPhrases = ["not found", "no rollout", "does not exist", "unknown thread"]
+            let outcome: CodexAppServerSendOutcome = missingThreadPhrases.contains(where: {
+                message.localizedCaseInsensitiveContains($0)
+            }) ? .threadNotLoaded : .failed
+            finish(outcome: outcome)
+            terminate()
+            return
+        }
         if requestID == RequestID.sendAction,
            pendingTurnStart == nil,
            message.localizedCaseInsensitiveContains("active turn") {
@@ -590,6 +855,19 @@ private final class CodexAppServerSession {
             "method": "thread/loaded/list",
             "params": [:],
         ])
+    }
+
+    private func requestThreadResume() {
+        appendLog("thread/resume thread=\(threadID)")
+        schedulePhaseTimeout(
+            message: "thread/resume timed out",
+            after: .seconds(CodexAppServerRequestPolicy.threadResumeTimeoutSeconds)
+        )
+        send(CodexAppServerResumeRequestFactory.threadResume(
+            id: RequestID.resumeThread,
+            threadID: threadID,
+            cwd: cwd
+        ))
     }
 
     private func requestRecentTurns(id: Int) {
@@ -714,23 +992,15 @@ private final class CodexAppServerSession {
     }
 
     private var userInput: [[String: Any]] {
-        [
+        var input: [[String: Any]] = [
             [
                 "type": "text",
                 "text": prompt,
                 "text_elements": [],
             ],
         ]
-    }
-
-    private func loadedThreadIDs(from message: [String: Any]) -> Set<String> {
-        guard
-            let result = message["result"] as? [String: Any],
-            let data = result["data"] as? [String]
-        else {
-            return []
-        }
-        return Set(data)
+        input.append(contentsOf: attachments.map(\.appServerInputItem))
+        return input
     }
 
     private func notificationMatchesTargetThread(_ message: [String: Any]) -> Bool {

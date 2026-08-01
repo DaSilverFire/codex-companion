@@ -657,6 +657,12 @@ final class PetTrayProcessRefreshObserver {
     }
 }
 
+enum PetTrayPanelOrderingPolicy {
+    static func shouldOrderFront(wasVisible: Bool) -> Bool {
+        !wasVisible
+    }
+}
+
 @MainActor
 final class PetTrayPanel {
     static let shared = PetTrayPanel()
@@ -672,6 +678,22 @@ final class PetTrayPanel {
     private let processRefreshObserver = PetTrayProcessRefreshObserver()
 
     private init() {}
+
+    var usagePresentationGeometry: (
+        processTrayFrame: NSRect,
+        petWindowFrame: NSRect,
+        visibleFrame: NSRect
+    )? {
+        guard
+            let panel,
+            panel.isVisible,
+            let anchorWindow,
+            let visibleFrame = panel.screen?.visibleFrame
+                ?? anchorWindow.screen?.visibleFrame
+                ?? NSScreen.main?.visibleFrame
+        else { return nil }
+        return (panel.frame, anchorWindow.frame, visibleFrame)
+    }
 
     func update(anchorWindow: NSWindow, model: CompanionAppModel?, isShown: Bool) {
         self.anchorWindow = anchorWindow
@@ -736,7 +758,9 @@ final class PetTrayPanel {
                 animated: didMenuControlVisibilityChange
             )
             updateHostingView(for: panel, model: model, traySize: traySize)
-            panel.orderFront(nil)
+            if PetTrayPanelOrderingPolicy.shouldOrderFront(wasVisible: wasVisible) {
+                panel.orderFront(nil)
+            }
         } else {
             panel.alphaValue = 0
             panel.setFrame(nextFrame, display: true, animate: false)
@@ -751,6 +775,7 @@ final class PetTrayPanel {
         currentTraySize = traySize
         areMenuControlsVisible = nextMenuControlsVisible
         clearPanelSurface(panel)
+        CodexUsagePanel.shared.reposition()
     }
 
     func reposition() {
@@ -761,6 +786,7 @@ final class PetTrayPanel {
             areMenuControlsVisible: areMenuControlsVisible
         )
         setPanelFrameIfNeeded(panel, nextFrame)
+        CodexUsagePanel.shared.reposition()
     }
 
     func setMenuControlsVisible(_ isVisible: Bool) {
@@ -774,10 +800,12 @@ final class PetTrayPanel {
             areMenuControlsVisible: isVisible
         )
         setPanelFrameIfNeeded(panel, nextFrame, animated: true)
+        CodexUsagePanel.shared.reposition()
     }
 
     private func close() {
         stopOriginAnimation()
+        CodexUsagePanel.shared.dismiss()
         panel?.orderOut(nil)
         panel?.alphaValue = 1
     }

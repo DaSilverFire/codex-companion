@@ -127,21 +127,17 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Codex Usage") {
-                LabeledContent("Remaining") {
-                    Text(model.rateLimitStore.menuSummary)
-                        .foregroundStyle(.secondary)
-                }
-
-                Text("Banked resets are only applied after explicit confirmation.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Button {
-                    model.rateLimitStore.refresh()
-                } label: {
-                    Label("Refresh Usage", systemImage: "arrow.clockwise")
-                }
+            CodexAccountProfileSettingsSection(
+                automaticallyContinuesGoalsAcrossAccounts:
+                    $model.automaticallyContinuesGoalsAcrossAccounts,
+                automaticGoalContinuationStatus:
+                    model.automaticGoalContinuationStatus,
+                automaticallyContinuesQuotaInterruptedTasksAcrossAccounts:
+                    $model.automaticallyContinuesQuotaInterruptedTasksAcrossAccounts,
+                automaticTaskContinuationStatus:
+                    model.automaticTaskContinuationStatus
+            ) {
+                model.processStore.refresh()
             }
         }
         .formStyle(.grouped)

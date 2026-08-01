@@ -85,9 +85,12 @@ enum PetAnimationState: String, CaseIterable, Identifiable {
         }
     }
 
-    func frameTiming(frameCount: Int) -> (base: TimeInterval, final: TimeInterval) {
+    func frameTiming(
+        frameCount: Int,
+        preserveCycleDuration: Bool = false
+    ) -> (base: TimeInterval, final: TimeInterval) {
         let count = max(1, frameCount)
-        guard count > 12 else {
+        guard preserveCycleDuration || count > 12 else {
             return (previewFrameDuration, finalFrameDuration)
         }
 

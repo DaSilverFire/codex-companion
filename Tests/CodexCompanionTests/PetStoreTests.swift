@@ -108,7 +108,39 @@ struct PetStoreTests {
 
         #expect(store.selectedPetID == "custom:shadow-16")
         #expect(environment.defaults.string(forKey: "selectedPetID") == "custom:shadow-16")
-        #expect(environment.defaults.integer(forKey: "shadow16PetMigrationVersion") == 1)
+        #expect(environment.defaults.integer(forKey: "shadow16PetMigrationVersion") == 2)
+    }
+
+    @Test
+    func migratesNativeShadowSelectionFromVersionOne() throws {
+        let environment = try TestEnvironment()
+        defer { environment.cleanup() }
+        try makePet(id: "shadow-16", columns: 16, rows: 12, in: environment.companion)
+        try makePet(id: "shadow-native-v2", columns: 8, rows: 11, in: environment.native)
+        environment.defaults.set("custom:shadow-native-v2", forKey: "selectedPetID")
+        environment.defaults.set(1, forKey: "shadow16PetMigrationVersion")
+
+        let store = makeStore(environment)
+
+        #expect(store.selectedPetID == "custom:shadow-16")
+        #expect(environment.defaults.string(forKey: "selectedPetID") == "custom:shadow-16")
+        #expect(environment.defaults.integer(forKey: "shadow16PetMigrationVersion") == 2)
+    }
+
+    @Test
+    func versionTwoInitializationPreservesIntentionalNativeShadowSelection() throws {
+        let environment = try TestEnvironment()
+        defer { environment.cleanup() }
+        try makePet(id: "shadow-16", columns: 16, rows: 12, in: environment.companion)
+        try makePet(id: "shadow-native-v2", columns: 8, rows: 11, in: environment.native)
+        environment.defaults.set("custom:shadow-native-v2", forKey: "selectedPetID")
+        environment.defaults.set(2, forKey: "shadow16PetMigrationVersion")
+
+        let store = makeStore(environment)
+
+        #expect(store.selectedPetID == "custom:shadow-native-v2")
+        #expect(environment.defaults.string(forKey: "selectedPetID") == "custom:shadow-native-v2")
+        #expect(environment.defaults.integer(forKey: "shadow16PetMigrationVersion") == 2)
     }
 
     @Test
@@ -138,7 +170,7 @@ struct PetStoreTests {
 
         #expect(store.selectedPetID == "custom:shadow-32-real")
         #expect(environment.defaults.string(forKey: "selectedPetID") == "custom:shadow-32-real")
-        #expect(environment.defaults.integer(forKey: "shadow16PetMigrationVersion") == 1)
+        #expect(environment.defaults.integer(forKey: "shadow16PetMigrationVersion") == 2)
     }
 
     @Test
@@ -153,13 +185,13 @@ struct PetStoreTests {
         let firstStore = makeStore(environment)
 
         #expect(firstStore.selectedPetID == "custom:other-pet")
-        #expect(environment.defaults.integer(forKey: "shadow16PetMigrationVersion") == 1)
+        #expect(environment.defaults.integer(forKey: "shadow16PetMigrationVersion") == 2)
 
         firstStore.selectedPetID = "custom:shadow-32-real"
         let secondStore = makeStore(environment)
 
         #expect(secondStore.selectedPetID == "custom:shadow-32-real")
-        #expect(environment.defaults.integer(forKey: "shadow16PetMigrationVersion") == 1)
+        #expect(environment.defaults.integer(forKey: "shadow16PetMigrationVersion") == 2)
     }
 
     @Test

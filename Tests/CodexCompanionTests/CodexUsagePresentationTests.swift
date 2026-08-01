@@ -37,6 +37,45 @@ struct CodexUsagePresentationTests {
     }
 
     @Test
+    func usagePopoverOffersManualNewWorkAccountSelection() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(contentsOf: root
+            .appendingPathComponent("Sources/CodexCompanion/Views/CodexUsagePopover.swift"))
+
+        #expect(source.contains("@StateObject private var profileSwitcher"))
+        #expect(source.contains("@StateObject private var profileUsageStore"))
+        #expect(source.contains("Picker(\"New work account\""))
+        #expect(source.contains("profileSwitcher.selectProfile(id: profileID)"))
+        #expect(source.contains("await profileUsageStore.refresh(for: profile)"))
+        #expect(source.contains("New Codex work uses this account."))
+    }
+
+    @Test
+    func usageProfileDefaultsLoadTheApplicationPersistentDomain() throws {
+        let suiteName = "CodexUsagePresentationTests.\(UUID().uuidString)"
+        let suite = try #require(UserDefaults(suiteName: suiteName))
+        defer {
+            suite.removePersistentDomain(forName: suiteName)
+        }
+
+        let profile = CodexAccountProfile(id: UUID(), label: "Main")
+        suite.set(
+            try JSONEncoder().encode([profile]),
+            forKey: CodexAccountProfileStore.profilesKey
+        )
+
+        let resolvedDefaults = CodexUsageProfileDefaults.applicationDefaults(
+            bundleIdentifier: suiteName
+        )
+        let store = CodexAccountProfileStore(defaults: resolvedDefaults)
+
+        #expect(store.profiles == [profile])
+    }
+
+    @Test
     func popoverUsesNativeGlassWithoutOpaqueBacking() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -59,7 +98,7 @@ struct CodexUsagePresentationTests {
     }
 
     @Test
-    func usagePopoverOpensAboveItsPinnedAnchor() throws {
+    func usagePanelReplacesTheSystemPopoverPlacement() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -67,10 +106,47 @@ struct CodexUsagePresentationTests {
         let source = try String(contentsOf: root
             .appendingPathComponent("Sources/CodexCompanion/Views/ContentView.swift"))
 
-        #expect(source.contains(
+        #expect(source.contains("CodexUsagePanel.shared.toggle"))
+        #expect(!source.contains(
             ".popover(isPresented: $isUsagePresented, arrowEdge: .bottom)"
         ))
         #expect(source.contains("model.shouldShowPetMenuButton || isUsagePresented"))
+    }
+
+    @Test
+    func usagePanelAppliesItsFrameBeforeFirstPresentation() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(contentsOf: root
+            .appendingPathComponent("Sources/CodexCompanion/Views/CodexUsagePanel.swift"))
+        let repositionStart = try #require(source.range(of: "    func reposition() {"))
+        let presentStart = try #require(source.range(of: "    private func present("))
+        let repositionSource = source[repositionStart.lowerBound..<presentStart.lowerBound]
+
+        #expect(!repositionSource.contains("panel.isVisible"))
+    }
+
+    @Test
+    func usagePanelUsesABoundedScrollableViewportWhenPetSafeSpaceIsShort() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(contentsOf: root
+            .appendingPathComponent("Sources/CodexCompanion/Views/CodexUsagePanel.swift"))
+
+        #expect(source.contains("NSScrollView"))
+        #expect(source.contains("scrollView.documentView = hostingView"))
+        #expect(source.contains("scrollView.hasVerticalScroller = true"))
+        #expect(source.contains("scrollView.autohidesScrollers = true"))
+        #expect(source.contains("panel.contentMinSize = frame.size"))
+        #expect(source.contains("panel.contentMaxSize = frame.size"))
+        #expect(source.contains("height: max(contentSize.height, viewportSize.height)"))
+        #expect(source.contains("scrollView.contentView.scroll(to: .zero)"))
+        #expect(source.contains("override func layout()"))
+        #expect(source.contains("scheduleContentSizeUpdate()"))
     }
 
     @Test

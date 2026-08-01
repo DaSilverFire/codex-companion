@@ -26,6 +26,7 @@ struct CodexProcessItem: Identifiable, Hashable, Codable, Sendable {
     var status: Status
     var threadID: String?
     var cwd: String?
+    var rolloutPath: String? = nil
     var activeTurnID: String? = nil
     var goalID: String?
     var goalObjective: String?
@@ -33,6 +34,7 @@ struct CodexProcessItem: Identifiable, Hashable, Codable, Sendable {
     var goalTokenBudget: Int? = nil
     var goalElapsedSeconds: Int?
     var goalTimerReferenceDate: Date?
+    var goalUpdatedAt: Date? = nil
     var runtimeStatus: CodexThreadRuntimeStatus? = nil
 
     var isActive: Bool {
@@ -50,6 +52,37 @@ struct CodexProcessItem: Identifiable, Hashable, Codable, Sendable {
 
     var canUseAsDefaultCodexTarget: Bool {
         canTargetCodexThread && !isCompanionDevelopmentThread
+    }
+
+    var rolloutURL: URL? {
+        guard let rolloutPath else { return nil }
+        let normalizedPath = rolloutPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedPath.isEmpty else { return nil }
+        if let parsedURL = URL(string: normalizedPath),
+           let scheme = parsedURL.scheme,
+           scheme.lowercased() != "file"
+        {
+            return nil
+        }
+        let fileURL = normalizedPath.lowercased().hasPrefix("file://")
+            ? URL(string: normalizedPath)
+            : URL(fileURLWithPath: normalizedPath)
+        guard let fileURL, fileURL.isFileURL, !fileURL.path.isEmpty else { return nil }
+        return fileURL.standardizedFileURL
+    }
+
+    var canSwitchCodexAccount: Bool {
+        guard canTargetCodexThread, rolloutURL != nil, status != .running else {
+            return false
+        }
+        switch runtimeStatus {
+        case .active, .waitingOnApproval, .waitingOnUserInput:
+            return false
+        case .idle, .notLoaded, .systemError:
+            return true
+        case nil:
+            return status == .completed || status == .failed
+        }
     }
 
     var isCompanionDevelopmentThread: Bool {
@@ -309,6 +342,7 @@ final class CodexProcessStore: ObservableObject {
         merged.goalTokenBudget = cached.goalTokenBudget
         merged.goalElapsedSeconds = cached.goalElapsedSeconds
         merged.goalTimerReferenceDate = cached.goalTimerReferenceDate
+        merged.goalUpdatedAt = cached.goalUpdatedAt
         merged.startedAt = cached.startedAt
         merged.status = threadStatus(isFresh: true, goalStatus: cached.goalStatus)
         merged.subtitle = threadSubtitle(
@@ -336,6 +370,7 @@ final class CodexProcessStore: ObservableObject {
         updated.goalTokenBudget = goal.tokenBudget
         updated.goalElapsedSeconds = goal.timeUsedSeconds
         updated.goalTimerReferenceDate = goal.status == .active ? goalUpdatedAt : nil
+        updated.goalUpdatedAt = goalUpdatedAt
         updated.startedAt = createdAt
         updated.status = threadStatus(isFresh: true, goalStatus: goal.status)
         updated.subtitle = threadSubtitle(
@@ -359,6 +394,7 @@ final class CodexProcessStore: ObservableObject {
         cleared.goalTokenBudget = nil
         cleared.goalElapsedSeconds = nil
         cleared.goalTimerReferenceDate = nil
+        cleared.goalUpdatedAt = nil
         cleared.startedAt = nil
         let isFresh = item.updatedAt.map {
             Date().timeIntervalSince($0) < Self.threadRunningFreshnessWindow
@@ -862,6 +898,7 @@ final class CodexProcessStore: ObservableObject {
             } ?? false
             let firstMessage = columns[4].trimmingCharacters(in: .whitespacesAndNewlines)
             let cwd = columns[2].trimmingCharacters(in: .whitespacesAndNewlines)
+            let rolloutPath = columns[5].trimmingCharacters(in: .whitespacesAndNewlines)
             let title = chatDisplayTitle(
                 threadID: columns[0],
                 databaseTitle: columns[1],
@@ -888,6 +925,9 @@ final class CodexProcessStore: ObservableObject {
                 createdAtMilliseconds: columns[10],
                 updatedAtMilliseconds: columns[11]
             )
+            let goalUpdatedAt = goalStatus == nil
+                ? nil
+                : date(fromMillisecondsString: columns[11])
             let status = threadStatus(isFresh: isFresh, goalStatus: goalStatus)
             let subtitle = threadSubtitle(
                 status: status,
@@ -908,12 +948,14 @@ final class CodexProcessStore: ObservableObject {
                 status: status,
                 threadID: columns[0],
                 cwd: cwd.isEmpty ? nil : cwd,
+                rolloutPath: rolloutPath.isEmpty ? nil : rolloutPath,
                 activeTurnID: rolloutSnapshot.turnID,
                 goalID: goalStatus == nil || columns[6].isEmpty ? nil : columns[6],
                 goalObjective: goalStatus == nil || columns[7].isEmpty ? nil : columns[7],
                 goalStatus: goalStatus,
                 goalElapsedSeconds: goalElapsedSeconds,
-                goalTimerReferenceDate: goalTimerReferenceDate
+                goalTimerReferenceDate: goalTimerReferenceDate,
+                goalUpdatedAt: goalUpdatedAt
             )
         }
     }
@@ -944,6 +986,7 @@ final class CodexProcessStore: ObservableObject {
             } ?? false
             let firstMessage = columns[4].trimmingCharacters(in: .whitespacesAndNewlines)
             let cwd = columns[2].trimmingCharacters(in: .whitespacesAndNewlines)
+            let rolloutPath = columns[5].trimmingCharacters(in: .whitespacesAndNewlines)
             let title = chatDisplayTitle(
                 threadID: columns[0],
                 databaseTitle: columns[1],
@@ -965,6 +1008,7 @@ final class CodexProcessStore: ObservableObject {
                 status: isFresh ? .running : .completed,
                 threadID: columns[0],
                 cwd: cwd.isEmpty ? nil : cwd,
+                rolloutPath: rolloutPath.isEmpty ? nil : rolloutPath,
                 activeTurnID: rolloutSnapshot.turnID,
                 goalID: nil,
                 goalObjective: nil,
@@ -1081,31 +1125,28 @@ final class CodexProcessStore: ObservableObject {
             .appendingPathComponent("state_5.sqlite")
         guard FileManager.default.fileExists(atPath: database.path) else { return [] }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
         let columnSeparator = "\u{1f}"
         let rowSeparator = "\u{1e}"
-        process.arguments = [
-            "-separator", columnSeparator,
-            "-newline", rowSeparator,
-            database.path,
-            query,
-        ]
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-
+        let arguments = CodexSQLiteProcessRunner.readArguments(
+            databaseURL: database,
+            query: query,
+            columnSeparator: columnSeparator,
+            rowSeparator: rowSeparator
+        )
+        let result: CodexSQLiteProcessResult
         do {
-            try process.run()
-            process.waitUntilExit()
+            result = try CodexSQLiteProcessRunner.retryingTransientRead {
+                try CodexSQLiteProcessRunner.run(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/sqlite3"),
+                    arguments: arguments
+                )
+            }
         } catch {
             return []
         }
 
-        guard process.terminationStatus == 0 else { return [] }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(decoding: data, as: UTF8.self)
+        guard result.terminationStatus == 0 else { return [] }
+        let output = String(decoding: result.standardOutput, as: UTF8.self)
         return output
             .split(separator: Character(rowSeparator), omittingEmptySubsequences: true)
             .map { line in line.split(separator: Character(columnSeparator), omittingEmptySubsequences: false).map(String.init) }

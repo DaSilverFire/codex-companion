@@ -48,4 +48,27 @@ struct CompanionSettingsPresentationTests {
         #expect(source.contains("Use Automatic"))
         #expect(source.contains("CompanionRelaySettings.useBundledRelay()"))
     }
+
+    @Test
+    func accountSettingsExposeOfficialProfileLoginAndProfileScopedUsage() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(contentsOf: root
+            .appendingPathComponent("Sources/CodexCompanion/Views/CodexAccountProfileSettingsSection.swift"))
+
+        #expect(source.contains("Sign In to Codex"))
+        #expect(source.contains("Usage for"))
+        #expect(source.contains("Apply Reset"))
+        #expect(source.contains("Active turns stay with the account that started them"))
+        #expect(source.contains("Remove or hand off its bound tasks first"))
+        #expect(source.contains("Continue quota-limited goals with another account"))
+        #expect(source.contains("Continue quota-interrupted tasks without goals"))
+        #expect(source.contains("explicit usage-limit turn failure"))
+        #expect(source.contains("Network and relay errors are ignored"))
+        #expect(source.contains("Banked resets stay untouched"))
+        #expect(!source.contains("Open ChatGPT to Switch Account"))
+        #expect(!source.contains("Account Changed - Reconnect"))
+    }
 }

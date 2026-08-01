@@ -3,6 +3,10 @@ import Foundation
 struct CompanionInteractionPreferences {
     private static let hidesMenuButtonUntilHoverKey = "hidesMenuButtonUntilHover"
     private static let allowsAutonomousPetMovementKey = "allowsAutonomousPetMovement"
+    private static let automaticallyContinuesGoalsAcrossAccountsKey =
+        "automaticallyContinuesGoalsAcrossAccounts"
+    private static let automaticallyContinuesQuotaInterruptedTasksAcrossAccountsKey =
+        "automaticallyContinuesQuotaInterruptedTasksAcrossAccounts"
 
     let defaults: UserDefaults
 
@@ -28,6 +32,32 @@ struct CompanionInteractionPreferences {
         }
         nonmutating set {
             defaults.set(newValue, forKey: Self.allowsAutonomousPetMovementKey)
+        }
+    }
+
+    var automaticallyContinuesGoalsAcrossAccounts: Bool {
+        get {
+            defaults.bool(forKey: Self.automaticallyContinuesGoalsAcrossAccountsKey)
+        }
+        nonmutating set {
+            defaults.set(
+                newValue,
+                forKey: Self.automaticallyContinuesGoalsAcrossAccountsKey
+            )
+        }
+    }
+
+    var automaticallyContinuesQuotaInterruptedTasksAcrossAccounts: Bool {
+        get {
+            defaults.bool(
+                forKey: Self.automaticallyContinuesQuotaInterruptedTasksAcrossAccountsKey
+            )
+        }
+        nonmutating set {
+            defaults.set(
+                newValue,
+                forKey: Self.automaticallyContinuesQuotaInterruptedTasksAcrossAccountsKey
+            )
         }
     }
 }

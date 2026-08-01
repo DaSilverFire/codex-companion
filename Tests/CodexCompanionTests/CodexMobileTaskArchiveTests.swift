@@ -718,6 +718,32 @@ struct CodexMobileTaskArchiveTests {
     }
 
     @Test
+    func subagentFamilyResolvesTheParentWhenOpeningASubagentDirectly() throws {
+        let fixture = try ArchiveFixture()
+        defer { fixture.remove() }
+
+        try fixture.insertThread(id: "parent", title: "Parent task")
+        try fixture.insertThread(
+            id: "agent-old",
+            title: "Inspect transport",
+            source: fixture.subagentSource(parentID: "parent", nickname: "Curie", role: "explorer"),
+            recency: 100
+        )
+        try fixture.insertThread(
+            id: "agent-new",
+            title: "Build mobile timeline",
+            source: fixture.subagentSource(parentID: "parent", nickname: "Noether", role: "worker"),
+            recency: 200
+        )
+
+        let family = try CodexMobileTaskArchive(homeDirectory: fixture.root)
+            .subagentFamily(threadID: "agent-new", limit: 8)
+
+        #expect(family.mainThreadID == "parent")
+        #expect(family.subagents.map(\.id) == ["agent-new", "agent-old"])
+    }
+
+    @Test
     func pagesLongHistoryBackwardWithoutDuplicatesOrInternalContext() throws {
         let fixture = try ArchiveFixture()
         defer { fixture.remove() }
@@ -810,6 +836,47 @@ struct CodexMobileTaskArchiveTests {
         #expect(newest.messages.map(\.text) == ["Newer visible", "Newest visible"])
         #expect(older.messages.map(\.text) == ["Oldest visible"])
         #expect(older.nextCursor == nil)
+    }
+
+    @Test
+    func loadsTimelineAcrossARealSizedCompactionRecordWithinInteractiveDeadline() throws {
+        let fixture = try ArchiveFixture()
+        defer { fixture.remove() }
+
+        FileManager.default.createFile(atPath: fixture.rolloutURL.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: fixture.rolloutURL)
+        defer { try? handle.close() }
+        try handle.write(contentsOf: Data((fixture.messageLine(
+            id: "oldest",
+            role: "user",
+            text: "Oldest visible",
+            turnID: "turn-old"
+        ) + "\n").utf8))
+        let compactionChunk = Data(repeating: 0x78, count: 1024 * 1024)
+        for _ in 0..<50 {
+            try handle.write(contentsOf: compactionChunk)
+        }
+        try handle.write(contentsOf: Data("\n".utf8))
+        try handle.write(contentsOf: Data((fixture.messageLine(
+            id: "newest",
+            role: "assistant",
+            text: "Newest visible",
+            turnID: "turn-new"
+        ) + "\n").utf8))
+        try handle.synchronize()
+        try fixture.insertThread(id: "thread-large-compaction", title: "Large compaction history")
+
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        let page = try CodexMobileTaskArchive(homeDirectory: fixture.root).timeline(
+            threadID: "thread-large-compaction",
+            cursor: nil,
+            limit: 2
+        )
+        let elapsed = startedAt.duration(to: clock.now)
+
+        #expect(page.items.compactMap(\.text) == ["Oldest visible", "Newest visible"])
+        #expect(elapsed < .milliseconds(200), "Large compaction scan took \(elapsed)")
     }
 
     @Test

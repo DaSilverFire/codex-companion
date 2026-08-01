@@ -216,15 +216,32 @@ final class PetStore: ObservableObject {
     ]
 
     private func selectedPetIDAfterReload(in loaded: [PetDefinition]) -> String? {
-        if defaults.integer(forKey: Self.migrationVersionKey) < Self.currentMigrationVersion,
-           loaded.contains(where: { $0.id == Self.preferredDefaultPetID }) {
-            defaults.set(Self.currentMigrationVersion, forKey: Self.migrationVersionKey)
-            if defaults.string(forKey: Self.selectedPetIDKey) == Self.legacyShadowPetID {
-                return Self.preferredDefaultPetID
-            }
+        guard loaded.contains(where: { $0.id == Self.preferredDefaultPetID }) else {
+            return resolvedSelectedPetID(in: loaded)
         }
 
-        return resolvedSelectedPetID(in: loaded)
+        var migrationVersion = defaults.integer(forKey: Self.migrationVersionKey)
+        var restoredPetID = defaults.string(forKey: Self.selectedPetIDKey)
+
+        if migrationVersion < 1 {
+            if restoredPetID == Self.legacyShadowPetID {
+                restoredPetID = Self.preferredDefaultPetID
+            }
+            migrationVersion = 1
+        }
+
+        if migrationVersion < 2 {
+            if restoredPetID == Self.nativeShadowPetID {
+                restoredPetID = Self.preferredDefaultPetID
+            }
+            migrationVersion = 2
+        }
+
+        defaults.set(migrationVersion, forKey: Self.migrationVersionKey)
+        if let restoredPetID, loaded.contains(where: { $0.id == restoredPetID }) {
+            return restoredPetID
+        }
+        return defaultPet(from: loaded)?.id
     }
 
     private func resolvedSelectedPetID(in loaded: [PetDefinition]) -> String? {
@@ -240,7 +257,7 @@ final class PetStore: ObservableObject {
 
     private static let preferredDefaultPetID = "custom:shadow-16"
     private static let legacyShadowPetID = "custom:shadow-32-real"
+    private static let nativeShadowPetID = "custom:shadow-native-v2"
     private static let selectedPetIDKey = "selectedPetID"
     private static let migrationVersionKey = "shadow16PetMigrationVersion"
-    private static let currentMigrationVersion = 1
 }

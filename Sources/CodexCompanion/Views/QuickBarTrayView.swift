@@ -168,6 +168,13 @@ struct QuickBarTrayView: View {
                         : nil,
                     inlineComposerHeight: inlineComposerHeight,
                     isApproving: model.approvingThreadID == item.threadID,
+                    accountProfiles: model.hoveredProcessID == item.id
+                        ? model.availableCodexAccountProfiles(for: item)
+                        : [],
+                    isSwitchingAccount: model.isSwitchingAccountForProcessID == item.id,
+                    accountHandoffFeedback: model.accountHandoffFeedback?.processID == item.id
+                        ? model.accountHandoffFeedback
+                        : nil,
                     goalControl: model.activeGoalControl,
                     isUpdatingGoal: model.isUpdatingGoal,
                     goalControlError: model.goalControlError,
@@ -191,6 +198,10 @@ struct QuickBarTrayView: View {
                 } tellCodex: {
                     model.tellCodexSomethingElse(item)
                     promptFocused = true
+                } switchAccount: { profile in
+                    model.switchCodexAccount(for: item, to: profile)
+                } dismissAccountHandoffFeedback: {
+                    model.dismissAccountHandoffFeedback(for: item.id)
                 }
                 .id(item.id)
             }
@@ -1212,6 +1223,9 @@ private struct ProcessCard: View {
     var inlineComposer: AnyView?
     var inlineComposerHeight: CGFloat
     var isApproving: Bool
+    var accountProfiles: [CodexAccountProfile]
+    var isSwitchingAccount: Bool
+    var accountHandoffFeedback: CodexAccountHandoffFeedback?
     var goalControl: CodexGoalControlState?
     var isUpdatingGoal: Bool
     var goalControlError: String?
@@ -1227,6 +1241,8 @@ private struct ProcessCard: View {
     var approveOnce: () -> Void
     var approveSimilar: () -> Void
     var tellCodex: () -> Void
+    var switchAccount: (CodexAccountProfile) -> Void
+    var dismissAccountHandoffFeedback: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -1255,7 +1271,9 @@ private struct ProcessCard: View {
                 ProcessStatusBadge(status: item.status)
             }
 
-            if showsApprovalActions {
+            if let accountHandoffFeedback {
+                accountHandoffFeedbackRow(accountHandoffFeedback)
+            } else if showsApprovalActions {
                 HStack(spacing: 4) {
                     ProcessActionButton(
                         title: "Approve once",
@@ -1284,7 +1302,7 @@ private struct ProcessCard: View {
                 }
                 .frame(height: 24, alignment: .top)
                 .transition(.opacity.combined(with: .move(edge: .top)))
-            } else if !processActions.isEmpty {
+            } else if !processActions.isEmpty || !accountProfiles.isEmpty {
                 HStack(spacing: 6) {
                     if processActions.contains(.reply) {
                         ProcessActionButton(
@@ -1301,6 +1319,9 @@ private struct ProcessCard: View {
                             accessibilityLabel: "Steer \(item.title)",
                             action: steer
                         )
+                    }
+                    if !accountProfiles.isEmpty {
+                        accountProfileMenu
                     }
                     Spacer(minLength: 0)
                 }
@@ -1358,7 +1379,72 @@ private struct ProcessCard: View {
     }
 
     private var showsAnyActions: Bool {
-        showsApprovalActions || !processActions.isEmpty
+        accountHandoffFeedback != nil
+            || showsApprovalActions
+            || !processActions.isEmpty
+            || !accountProfiles.isEmpty
+    }
+
+    private func accountHandoffFeedbackRow(
+        _ feedback: CodexAccountHandoffFeedback
+    ) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: feedback.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                .font(.system(size: 9, weight: .semibold))
+
+            Text(feedback.message)
+                .font(.system(size: 9, weight: .medium))
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+
+            Spacer(minLength: 0)
+
+            Button(action: dismissAccountHandoffFeedback) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(TrayColors.textSecondary)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss account status for \(item.title)")
+        }
+        .foregroundStyle(feedback.isError ? Color.orange : Color.green)
+        .frame(height: 24, alignment: .top)
+        .help(feedback.message)
+        .transition(.opacity.combined(with: .move(edge: .top)))
+    }
+
+    private var accountProfileMenu: some View {
+        Menu {
+            Section("Resume with account") {
+                ForEach(accountProfiles) { profile in
+                    Button {
+                        switchAccount(profile)
+                    } label: {
+                        Label(profile.label, systemImage: "person.crop.circle")
+                    }
+                }
+            }
+        } label: {
+            Group {
+                if isSwitchingAccount {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    Image(systemName: "person.crop.circle.badge.arrow.trianglehead.counterclockwise")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+            }
+            .foregroundStyle(TrayColors.textPrimary)
+            .frame(width: 24, height: 24)
+            .trayRoundedControl(cornerRadius: 12)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .disabled(isSwitchingAccount)
+        .help("Resume this stopped task with another Codex account")
+        .accessibilityLabel("Switch Codex account for \(item.title)")
     }
 
     private var cardTint: Color? {

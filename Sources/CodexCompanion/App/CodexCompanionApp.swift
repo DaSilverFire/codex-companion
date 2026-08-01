@@ -54,14 +54,30 @@ struct CodexCompanionApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let mobileRuntime = CompanionMobileRuntimeController.shared
+    private var workspaceWakeObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         NSApp.activate(ignoringOtherApps: true)
         mobileRuntime.startIfEnabled()
+        workspaceWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.mobileRuntime.resumeAfterWake()
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if let workspaceWakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(
+                workspaceWakeObserver
+            )
+            self.workspaceWakeObserver = nil
+        }
         mobileRuntime.shutdown()
     }
 }

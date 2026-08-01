@@ -54,6 +54,29 @@ struct CompanionWindowLifecycleTests {
     }
 
     @Test
+    func anAlreadyVisibleTrayDoesNotReorderAbovePresentedPopovers() {
+        #expect(PetTrayPanelOrderingPolicy.shouldOrderFront(wasVisible: false))
+        #expect(!PetTrayPanelOrderingPolicy.shouldOrderFront(wasVisible: true))
+    }
+
+    @Test
+    func usagePanelCoversTheProcessTrayWithoutCoveringThePetAndExpandsUpward() {
+        let processTrayFrame = NSRect(x: 420, y: 360, width: 292, height: 118)
+        let petWindowFrame = NSRect(x: 504, y: 330, width: 124, height: 164)
+        let visibleFrame = NSRect(x: 0, y: 0, width: 1_440, height: 900)
+        let frame = CodexUsagePanelPositioningPolicy.frame(
+            contentSize: CGSize(width: 292, height: 340),
+            processTrayFrame: processTrayFrame,
+            petWindowFrame: petWindowFrame,
+            visibleFrame: visibleFrame
+        )
+
+        #expect(frame.minY >= petWindowFrame.maxY + CodexUsagePanelPositioningPolicy.screenMargin)
+        #expect(frame.maxY > processTrayFrame.maxY)
+        #expect(frame.midX == processTrayFrame.midX)
+    }
+
+    @Test
     func petControlsAndTrayReflowShareOneSettledSpring() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

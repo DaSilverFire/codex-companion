@@ -12,6 +12,7 @@ struct CompanionHistorySnapshot: Equatable, Sendable {
     var timelineItems: [CompanionBridgeTimelineItem]
     var revision: String
     var timelineNextCursor: String?
+    var mainThreadID: String? = nil
     var subagents: [CompanionBridgeSubagent]
     var contextUsage: CompanionBridgeContextUsage?
 }

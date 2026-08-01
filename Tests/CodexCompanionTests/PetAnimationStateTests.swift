@@ -31,6 +31,26 @@ struct PetAnimationStateTests {
     }
 
     @Test
+    func shortShadowContinuousRowsPreserveLongFormCycleTiming() {
+        let shadow = Self.pet(
+            id: "shadow-native-v2",
+            displayName: "Shadow",
+            columns: 8,
+            rows: 11,
+            frameCounts: [:]
+        )
+        let ordinary = Self.pet(rows: 9, frameCounts: [:])
+
+        let shadowIdle = shadow.frameTiming(for: .idle, frameCount: 6)
+        let ordinaryIdle = ordinary.frameTiming(for: .idle, frameCount: 6)
+        let shadowIdleCycle = shadowIdle.base * 5 + shadowIdle.final
+        let ordinaryIdleCycle = ordinaryIdle.base * 5 + ordinaryIdle.final
+
+        #expect(abs(shadowIdleCycle - 5.2) < 0.001)
+        #expect(abs(ordinaryIdleCycle - 1.04) < 0.001)
+    }
+
+    @Test
     func conversationStatesUseNativeRowsAndDefaultToSixteenFrames() {
         let pet = Self.pet(rows: 12, frameCounts: [:])
 
@@ -83,15 +103,18 @@ struct PetAnimationStateTests {
     }
 
     private static func pet(
+        id: String = "test-pet",
+        displayName: String = "Test Pet",
+        columns: Int = 16,
         rows: Int,
         frameCounts: [String: Int]
     ) -> PetDefinition {
         PetDefinition(
-            id: "test-pet",
-            displayName: "Test Pet",
+            id: id,
+            displayName: displayName,
             description: "Test fixture",
             spritesheetURL: URL(fileURLWithPath: "/tmp/test-pet.webp"),
-            spriteColumns: 16,
+            spriteColumns: columns,
             spriteRows: rows,
             animationFrameCounts: frameCounts,
             source: .builtIn(URL(fileURLWithPath: "/tmp"))

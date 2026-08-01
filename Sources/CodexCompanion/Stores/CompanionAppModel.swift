@@ -17,6 +17,25 @@ typealias CodexApprovalSubmitter = @Sendable (
     _ decision: CodexApprovalDecision
 ) async -> CodexAppServerApprovalOutcome
 
+typealias CodexAccountProfilesProvider = @Sendable () -> [CodexAccountProfile]
+typealias CodexThreadProfileIDProvider = @Sendable (_ threadID: String) -> UUID?
+typealias CodexAccountProfileAuthenticationChecker = @Sendable (
+    _ profile: CodexAccountProfile
+) async -> CodexAccountProfileAuthenticationState
+typealias CodexAccountProfileUsageReader = @Sendable (
+    _ profile: CodexAccountProfile
+) throws -> CodexUsageSnapshot
+typealias CodexAccountHandoffSubmitter = @Sendable (
+    _ threadID: String,
+    _ rolloutURL: URL,
+    _ hasActiveTurn: Bool,
+    _ profile: CodexAccountProfile
+) async throws -> CodexThreadAccountHandoffResult
+typealias CodexQuotaInterruptionReader = @Sendable (
+    _ threadID: String,
+    _ profile: CodexAccountProfile
+) throws -> CodexQuotaInterruption?
+
 typealias AutonomousPetMovementHandler = @MainActor (_ isAllowed: Bool) -> Void
 
 @MainActor
@@ -41,6 +60,14 @@ final class CompanionAppModel: ObservableObject {
     private let interactionPreferences: CompanionInteractionPreferences
     private let codexPromptSubmitter: CodexPromptSubmitter
     private let codexApprovalSubmitter: CodexApprovalSubmitter
+    private let codexAccountProfilesProvider: CodexAccountProfilesProvider
+    private let codexThreadProfileIDProvider: CodexThreadProfileIDProvider
+    private let codexAccountProfileAuthenticationChecker: CodexAccountProfileAuthenticationChecker
+    private let codexAccountProfileUsageReader: CodexAccountProfileUsageReader
+    private let codexAccountHandoffSubmitter: CodexAccountHandoffSubmitter
+    private let codexQuotaInterruptionReader: CodexQuotaInterruptionReader
+    private let automaticGoalContinuationStore: CodexAutomaticGoalContinuationStore
+    private let automaticTaskContinuationStore: CodexAutomaticTaskContinuationStore
     private let autonomousPetMovementHandler: AutonomousPetMovementHandler
     private let codexSendTimeout: Duration
     private let onDeviceChatService: any OnDeviceChatServing
@@ -62,6 +89,9 @@ final class CompanionAppModel: ObservableObject {
     @Published var isChatGPTResponding = false
     @Published var isCodexSending = false
     @Published private(set) var approvingThreadID: String?
+    @Published private(set) var isSwitchingAccountForProcessID: String?
+    @Published private(set) var accountHandoffError: String?
+    @Published private(set) var accountHandoffFeedback: CodexAccountHandoffFeedback?
     @Published private(set) var codexComposerFeedback: CodexComposerFeedback?
     @Published var openAIAPIKeyInput = ""
     @Published var openAIAPIKeyStatus: String
@@ -94,6 +124,27 @@ final class CompanionAppModel: ObservableObject {
             autonomousPetMovementHandler(allowsAutonomousPetMovement)
         }
     }
+    @Published var automaticallyContinuesGoalsAcrossAccounts: Bool {
+        didSet {
+            interactionPreferences.automaticallyContinuesGoalsAcrossAccounts =
+                automaticallyContinuesGoalsAcrossAccounts
+            if automaticallyContinuesGoalsAcrossAccounts {
+                evaluateAutomaticGoalContinuation(for: processStore.items)
+            }
+        }
+    }
+    @Published private(set) var automaticGoalContinuationStatus: String?
+    @Published var automaticallyContinuesQuotaInterruptedTasksAcrossAccounts: Bool {
+        didSet {
+            interactionPreferences
+                .automaticallyContinuesQuotaInterruptedTasksAcrossAccounts =
+                automaticallyContinuesQuotaInterruptedTasksAcrossAccounts
+            if automaticallyContinuesQuotaInterruptedTasksAcrossAccounts {
+                evaluateAutomaticTaskContinuation(for: processStore.items)
+            }
+        }
+    }
+    @Published private(set) var automaticTaskContinuationStatus: String?
     @Published private(set) var isPetPointerHovered = false
     @Published private(set) var isPetMenuControlHovered = false
     @Published private(set) var hoveredProcessID: String?
@@ -152,6 +203,10 @@ final class CompanionAppModel: ObservableObject {
     private var activeApprovalFeedbackTask: Task<Void, Never>?
     private var pendingCodexSendIdentity: CodexSendIdentity?
     private var pendingCodexClientMessageID: String?
+    private var automaticGoalContinuationTask: Task<Void, Never>?
+    private var automaticGoalContinuationRetryAfter: [String: Date] = [:]
+    private var automaticTaskContinuationTask: Task<Void, Never>?
+    private var automaticTaskContinuationRetryAfter: [String: Date] = [:]
 
     init(
         petReactionCoordinator: PetReactionCoordinator = PetReactionCoordinator(),
@@ -175,6 +230,44 @@ final class CompanionAppModel: ObservableObject {
                 decision: decision
             )
         },
+        codexAccountProfilesProvider: @escaping CodexAccountProfilesProvider = {
+            CodexAccountProfileStore().profiles
+        },
+        codexThreadProfileIDProvider: @escaping CodexThreadProfileIDProvider = { threadID in
+            CodexThreadAccountProfileBindingStore().profileID(for: threadID)
+        },
+        codexAccountProfileAuthenticationChecker: @escaping CodexAccountProfileAuthenticationChecker = { profile in
+            await CodexAccountProfileLoginService().status(for: profile)
+        },
+        codexAccountProfileUsageReader: @escaping CodexAccountProfileUsageReader = { profile in
+            try CodexAccountProfileUsageService().readUsage(for: profile)
+        },
+        codexAccountHandoffSubmitter: @escaping CodexAccountHandoffSubmitter = {
+            threadID,
+            rolloutURL,
+            hasActiveTurn,
+            profile in
+            try await Task.detached(priority: .userInitiated) {
+                try CodexThreadAccountHandoffService().handoff(
+                    threadID: threadID,
+                    rolloutURL: rolloutURL,
+                    hasActiveTurn: hasActiveTurn,
+                    to: profile
+                )
+            }.value
+        },
+        codexQuotaInterruptionReader: @escaping CodexQuotaInterruptionReader = {
+            threadID,
+            profile in
+            try CodexQuotaInterruptionInspector().read(
+                threadID: threadID,
+                profile: profile
+            )
+        },
+        automaticGoalContinuationStore: CodexAutomaticGoalContinuationStore =
+            CodexAutomaticGoalContinuationStore(),
+        automaticTaskContinuationStore: CodexAutomaticTaskContinuationStore =
+            CodexAutomaticTaskContinuationStore(),
         autonomousPetMovementHandler: @escaping AutonomousPetMovementHandler = { isAllowed in
             PetWindowRoamer.shared.setAutonomousMovementAllowed(isAllowed)
         },
@@ -187,11 +280,24 @@ final class CompanionAppModel: ObservableObject {
         self.onDeviceChatService = onDeviceChatService
         self.codexPromptSubmitter = codexPromptSubmitter
         self.codexApprovalSubmitter = codexApprovalSubmitter
+        self.codexAccountProfilesProvider = codexAccountProfilesProvider
+        self.codexThreadProfileIDProvider = codexThreadProfileIDProvider
+        self.codexAccountProfileAuthenticationChecker = codexAccountProfileAuthenticationChecker
+        self.codexAccountProfileUsageReader = codexAccountProfileUsageReader
+        self.codexAccountHandoffSubmitter = codexAccountHandoffSubmitter
+        self.codexQuotaInterruptionReader = codexQuotaInterruptionReader
+        self.automaticGoalContinuationStore = automaticGoalContinuationStore
+        self.automaticTaskContinuationStore = automaticTaskContinuationStore
         self.autonomousPetMovementHandler = autonomousPetMovementHandler
         self.codexSendTimeout = codexSendTimeout
         isPetVisible = petVisibilityPreference.isVisible
         hidesMenuButtonUntilHover = interactionPreferences.hidesMenuButtonUntilHover
         allowsAutonomousPetMovement = interactionPreferences.allowsAutonomousPetMovement
+        automaticallyContinuesGoalsAcrossAccounts =
+            interactionPreferences.automaticallyContinuesGoalsAcrossAccounts
+        automaticallyContinuesQuotaInterruptedTasksAcrossAccounts =
+            interactionPreferences
+                .automaticallyContinuesQuotaInterruptedTasksAcrossAccounts
         let speedTimingVersion = UserDefaults.standard.integer(forKey: Self.animationSpeedTimingVersionKey)
         let savedSpeed = UserDefaults.standard.double(forKey: Self.animationSpeedKey)
         if speedTimingVersion < Self.currentAnimationSpeedTimingVersion {
@@ -303,6 +409,698 @@ final class CompanionAppModel: ObservableObject {
 
     var processTargetSystemName: String? {
         activeProcessTarget?.action.systemName
+    }
+
+    func availableCodexAccountProfiles(
+        for item: CodexProcessItem
+    ) -> [CodexAccountProfile] {
+        guard item.canSwitchCodexAccount, let threadID = item.threadID else {
+            return []
+        }
+        let currentProfileID = codexThreadProfileIDProvider(threadID)
+        return codexAccountProfilesProvider().filter { profile in
+            profile.id != currentProfileID
+        }
+    }
+
+    func switchCodexAccount(
+        for item: CodexProcessItem,
+        to profile: CodexAccountProfile
+    ) {
+        guard item.canSwitchCodexAccount else {
+            let error = CodexThreadAccountHandoffError.activeTurn
+            failAccountHandoff(for: item.id, message: error.localizedDescription)
+            return
+        }
+        guard let threadID = item.threadID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !threadID.isEmpty
+        else {
+            let error = CodexThreadAccountHandoffError.invalidThreadID
+            failAccountHandoff(for: item.id, message: error.localizedDescription)
+            return
+        }
+        guard let rolloutURL = item.rolloutURL else {
+            let error = CodexThreadAccountHandoffError.invalidRolloutPath
+            failAccountHandoff(for: item.id, message: error.localizedDescription)
+            return
+        }
+        guard availableCodexAccountProfiles(for: item).contains(profile) else {
+            failAccountHandoff(
+                for: item.id,
+                message: "That Codex account is no longer available for this task."
+            )
+            return
+        }
+        guard isSwitchingAccountForProcessID == nil else { return }
+
+        let authenticationChecker = codexAccountProfileAuthenticationChecker
+        let submitter = codexAccountHandoffSubmitter
+        isSwitchingAccountForProcessID = item.id
+        accountHandoffError = nil
+        accountHandoffFeedback = nil
+        status = "Switching \(item.title) to \(profile.label)..."
+
+        Task { [weak self] in
+            guard let self else { return }
+            let authenticationState = await authenticationChecker(profile)
+            guard isSwitchingAccountForProcessID == item.id else { return }
+
+            switch authenticationState {
+            case .signedIn:
+                break
+            case .signedOut, .unchecked:
+                failAccountHandoff(
+                    for: item.id,
+                    message: "Sign in to \(profile.label) in Companion Settings before resuming this task."
+                )
+                return
+            case .checking, .signingIn:
+                failAccountHandoff(
+                    for: item.id,
+                    message: "Wait for \(profile.label) sign-in to finish before resuming this task."
+                )
+                return
+            case .failed(let detail):
+                failAccountHandoff(
+                    for: item.id,
+                    message: "Could not verify \(profile.label): \(detail)"
+                )
+                return
+            }
+
+            do {
+                _ = try await submitter(threadID, rolloutURL, false, profile)
+                guard isSwitchingAccountForProcessID == item.id else { return }
+                isSwitchingAccountForProcessID = nil
+                status = "\(item.title) will resume with \(profile.label)."
+                accountHandoffFeedback = CodexAccountHandoffFeedback(
+                    processID: item.id,
+                    message: status,
+                    isError: false
+                )
+                objectWillChange.send()
+            } catch {
+                guard isSwitchingAccountForProcessID == item.id else { return }
+                let message = (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
+                failAccountHandoff(for: item.id, message: message)
+            }
+        }
+    }
+
+    func evaluateAutomaticGoalContinuation(for items: [CodexProcessItem]) {
+        guard
+            automaticallyContinuesGoalsAcrossAccounts,
+            automaticGoalContinuationTask == nil
+        else {
+            return
+        }
+
+        if let pending = automaticGoalContinuationStore.pendingRecord {
+            guard
+                let item = items.first(where: { $0.threadID == pending.threadID })
+            else {
+                return
+            }
+
+            let goalStillMatches = pending.goalID == nil || pending.goalID == item.goalID
+            guard goalStillMatches, CodexAutomaticGoalContinuationPolicy.isEligible(item) else {
+                automaticGoalContinuationStore.markCompleted(pending)
+                automaticGoalContinuationRetryAfter.removeValue(forKey: pending.eventKey)
+                return
+            }
+            guard retryIsReady(for: pending.eventKey) else { return }
+            startAutomaticGoalContinuation(item: item, pending: pending)
+            return
+        }
+
+        for item in items where CodexAutomaticGoalContinuationPolicy.isEligible(item) {
+            guard
+                let eventKey = CodexAutomaticGoalContinuationPolicy.eventKey(for: item),
+                !automaticGoalContinuationStore.hasCompleted(eventKey: eventKey),
+                retryIsReady(for: eventKey)
+            else {
+                continue
+            }
+
+            startAutomaticGoalContinuation(item: item, pending: nil)
+            return
+        }
+    }
+
+    private func startAutomaticGoalContinuation(
+        item: CodexProcessItem,
+        pending: CodexAutomaticGoalContinuationRecord?
+    ) {
+        automaticGoalContinuationTask = Task { [weak self] in
+            guard let self else { return }
+            await performAutomaticGoalContinuation(item: item, pending: pending)
+            automaticGoalContinuationTask = nil
+        }
+    }
+
+    private func performAutomaticGoalContinuation(
+        item originalItem: CodexProcessItem,
+        pending existingRecord: CodexAutomaticGoalContinuationRecord?
+    ) async {
+        guard automaticallyContinuesGoalsAcrossAccounts else { return }
+
+        let profiles = codexAccountProfilesProvider()
+        let sourceProfileID = existingRecord?.sourceProfileID
+            ?? originalItem.threadID.flatMap(codexThreadProfileIDProvider)
+        guard
+            let eventKey = existingRecord?.eventKey
+                ?? CodexAutomaticGoalContinuationPolicy.eventKey(for: originalItem)
+        else {
+            return
+        }
+
+        var record = existingRecord
+        var targetProfile: CodexAccountProfile?
+
+        if let existingRecord,
+           let existingTarget = profiles.first(where: {
+               $0.id == existingRecord.targetProfileID
+           })
+        {
+            if await profileCanContinue(existingTarget) {
+                targetProfile = existingTarget
+            } else if existingRecord.stage == .handedOff {
+                automaticGoalContinuationStatus =
+                    "\(existingTarget.label) has no Codex usage available yet."
+                scheduleAutomaticGoalContinuationRetry(
+                    eventKey: eventKey,
+                    after: 5 * 60
+                )
+                return
+            } else {
+                automaticGoalContinuationStore.discardPending(id: existingRecord.id)
+                record = nil
+            }
+        } else if let existingRecord {
+            automaticGoalContinuationStore.discardPending(id: existingRecord.id)
+            record = nil
+        }
+
+        if targetProfile == nil {
+            automaticGoalContinuationStatus = "Checking another Codex account..."
+            for profile in CodexAutomaticGoalContinuationPolicy.orderedTargetProfiles(
+                profiles,
+                after: sourceProfileID
+            ) where profile.id != sourceProfileID {
+                if await profileCanContinue(profile) {
+                    targetProfile = profile
+                    break
+                }
+            }
+        }
+
+        guard let targetProfile else {
+            automaticGoalContinuationStatus =
+                "No signed-in Codex profile with available usage is ready."
+            scheduleAutomaticGoalContinuationRetry(
+                eventKey: eventKey,
+                after: 5 * 60
+            )
+            return
+        }
+
+        if record == nil {
+            record = CodexAutomaticGoalContinuationRecord(
+                id: UUID(),
+                eventKey: eventKey,
+                threadID: originalItem.threadID ?? originalItem.id,
+                goalID: originalItem.goalID,
+                sourceProfileID: sourceProfileID,
+                targetProfileID: targetProfile.id,
+                stage: .planned
+            )
+            automaticGoalContinuationStore.savePending(record!)
+        }
+        guard var record else { return }
+
+        guard
+            let currentItem = currentAutomaticContinuationItem(
+                matching: originalItem
+            )
+        else {
+            automaticGoalContinuationStore.discardPending(id: record.id)
+            automaticGoalContinuationStatus =
+                "Automatic continuation stopped because the task state changed."
+            return
+        }
+
+        let currentBinding = currentItem.threadID.flatMap(codexThreadProfileIDProvider)
+        if currentBinding != targetProfile.id {
+            guard record.stage == .planned else {
+                automaticGoalContinuationStatus =
+                    "Automatic continuation is waiting for the account handoff to settle."
+                scheduleAutomaticGoalContinuationRetry(
+                    eventKey: eventKey,
+                    after: 2 * 60
+                )
+                return
+            }
+            guard
+                let threadID = currentItem.threadID,
+                let rolloutURL = currentItem.rolloutURL
+            else {
+                automaticGoalContinuationStore.discardPending(id: record.id)
+                return
+            }
+
+            automaticGoalContinuationStatus =
+                "Moving \(currentItem.title) to \(targetProfile.label)..."
+            do {
+                _ = try await codexAccountHandoffSubmitter(
+                    threadID,
+                    rolloutURL,
+                    false,
+                    targetProfile
+                )
+                record.stage = .handedOff
+                automaticGoalContinuationStore.savePending(record)
+            } catch {
+                automaticGoalContinuationStatus =
+                    "Could not continue with \(targetProfile.label): \(error.localizedDescription)"
+                scheduleAutomaticGoalContinuationRetry(
+                    eventKey: eventKey,
+                    after: 2 * 60
+                )
+                return
+            }
+        } else if record.stage == .planned {
+            record.stage = .handedOff
+            automaticGoalContinuationStore.savePending(record)
+        }
+
+        guard automaticallyContinuesGoalsAcrossAccounts else { return }
+        automaticGoalContinuationStatus =
+            "Continuing \(currentItem.title) with \(targetProfile.label)..."
+        let outcome = await codexPromptSubmitter(
+            "continue",
+            record.threadID,
+            currentItem.cwd,
+            .reply,
+            nil,
+            "companion-auto-goal-\(record.id.uuidString.lowercased())",
+            {}
+        )
+
+        if outcome == .sent {
+            automaticGoalContinuationStore.markCompleted(record)
+            automaticGoalContinuationRetryAfter.removeValue(forKey: eventKey)
+            automaticGoalContinuationStatus =
+                "Continued \(currentItem.title) with \(targetProfile.label)."
+            CodexSendLog.append(
+                "automatic goal continuation sent thread=\(record.threadID) profile=\(targetProfile.id.uuidString)"
+            )
+            processStore.refresh()
+        } else {
+            automaticGoalContinuationStatus =
+                "The account changed, but Codex did not accept the automatic continue message."
+            scheduleAutomaticGoalContinuationRetry(
+                eventKey: eventKey,
+                after: 2 * 60
+            )
+        }
+    }
+
+    private func profileCanContinue(_ profile: CodexAccountProfile) async -> Bool {
+        guard await codexAccountProfileAuthenticationChecker(profile) == .signedIn else {
+            return false
+        }
+
+        let reader = codexAccountProfileUsageReader
+        let result = await Task.detached(priority: .utility) {
+            Result { try reader(profile) }
+        }.value
+        guard case .success(let snapshot) = result else { return false }
+        return CodexAutomaticGoalContinuationPolicy.hasAvailableCodexUsage(snapshot)
+    }
+
+    private func currentAutomaticContinuationItem(
+        matching originalItem: CodexProcessItem
+    ) -> CodexProcessItem? {
+        let current = processStore.items.first {
+            $0.threadID == originalItem.threadID
+        }
+        let candidate = current ?? (processStore.items.isEmpty ? originalItem : nil)
+        guard
+            let candidate,
+            CodexAutomaticGoalContinuationPolicy.isEligible(candidate)
+        else {
+            return nil
+        }
+        return candidate
+    }
+
+    private func retryIsReady(for eventKey: String, now: Date = Date()) -> Bool {
+        automaticGoalContinuationRetryAfter[eventKey].map { $0 <= now } ?? true
+    }
+
+    private func scheduleAutomaticGoalContinuationRetry(
+        eventKey: String,
+        after delay: TimeInterval
+    ) {
+        automaticGoalContinuationRetryAfter[eventKey] = Date().addingTimeInterval(delay)
+    }
+
+    func evaluateAutomaticTaskContinuation(for items: [CodexProcessItem]) {
+        guard
+            automaticallyContinuesQuotaInterruptedTasksAcrossAccounts,
+            automaticTaskContinuationTask == nil
+        else {
+            return
+        }
+
+        if let pending = automaticTaskContinuationStore.pendingRecord {
+            guard
+                let item = items.first(where: { $0.threadID == pending.threadID })
+            else {
+                return
+            }
+            guard CodexAutomaticTaskContinuationPolicy.isCandidate(item) else {
+                automaticTaskContinuationStore.markCompleted(pending)
+                automaticTaskContinuationRetryAfter.removeValue(forKey: pending.eventKey)
+                return
+            }
+            guard automaticTaskRetryIsReady(for: pending.eventKey) else { return }
+            startAutomaticTaskContinuation(item: item, pending: pending)
+            return
+        }
+
+        for item in items where CodexAutomaticTaskContinuationPolicy.isCandidate(item) {
+            let retryKey = automaticTaskCandidateRetryKey(for: item)
+            guard automaticTaskRetryIsReady(for: retryKey) else { continue }
+            startAutomaticTaskContinuation(item: item, pending: nil)
+            return
+        }
+    }
+
+    private func startAutomaticTaskContinuation(
+        item: CodexProcessItem,
+        pending: CodexAutomaticTaskContinuationRecord?
+    ) {
+        automaticTaskContinuationTask = Task { [weak self] in
+            guard let self else { return }
+            await performAutomaticTaskContinuation(item: item, pending: pending)
+            automaticTaskContinuationTask = nil
+        }
+    }
+
+    private func performAutomaticTaskContinuation(
+        item originalItem: CodexProcessItem,
+        pending existingRecord: CodexAutomaticTaskContinuationRecord?
+    ) async {
+        guard automaticallyContinuesQuotaInterruptedTasksAcrossAccounts else { return }
+
+        let profiles = codexAccountProfilesProvider()
+        let sourceProfileID = existingRecord?.sourceProfileID
+            ?? originalItem.threadID.flatMap(codexThreadProfileIDProvider)
+        guard
+            let sourceProfileID,
+            let sourceProfile = profiles.first(where: { $0.id == sourceProfileID }),
+            let threadID = originalItem.threadID
+        else {
+            automaticTaskContinuationStatus =
+                "Automatic continuation could not identify the task's original Codex account."
+            return
+        }
+
+        var record = existingRecord
+        var eventKey = existingRecord?.eventKey
+        let candidateRetryKey = automaticTaskCandidateRetryKey(for: originalItem)
+
+        if record == nil {
+            let sourceUsageResult = await readUsage(for: sourceProfile)
+            guard
+                case .success(let sourceUsage) = sourceUsageResult,
+                CodexAutomaticTaskContinuationPolicy
+                    .hasConfirmedCodexExhaustion(sourceUsage)
+            else {
+                automaticTaskContinuationStatus =
+                    "Automatic continuation is waiting for confirmed Codex usage exhaustion."
+                scheduleAutomaticTaskContinuationRetry(
+                    eventKey: candidateRetryKey,
+                    after: 5 * 60
+                )
+                return
+            }
+
+            let reader = codexQuotaInterruptionReader
+            let inspectionResult = await Task.detached(priority: .utility) {
+                Result {
+                    try reader(threadID, sourceProfile)
+                }
+            }.value
+            switch inspectionResult {
+            case .success(let interruption):
+                guard let interruption else {
+                    scheduleAutomaticTaskContinuationRetry(
+                        eventKey: candidateRetryKey,
+                        after: 5 * 60
+                    )
+                    return
+                }
+                eventKey = interruption.eventKey
+                guard
+                    !automaticTaskContinuationStore.hasCompleted(
+                        eventKey: interruption.eventKey
+                    )
+                else {
+                    scheduleAutomaticTaskContinuationRetry(
+                        eventKey: candidateRetryKey,
+                        after: 5 * 60
+                    )
+                    return
+                }
+            case .failure(let error):
+                automaticTaskContinuationStatus =
+                    "Automatic continuation could not verify a Codex usage-limit stop: \(error.localizedDescription)"
+                scheduleAutomaticTaskContinuationRetry(
+                    eventKey: candidateRetryKey,
+                    after: 2 * 60
+                )
+                return
+            }
+        }
+
+        guard let eventKey else { return }
+        var targetProfile: CodexAccountProfile?
+
+        if let existingRecord,
+           let existingTarget = profiles.first(where: {
+               $0.id == existingRecord.targetProfileID
+           })
+        {
+            if await profileCanContinue(existingTarget) {
+                targetProfile = existingTarget
+            } else if existingRecord.stage == .handedOff {
+                automaticTaskContinuationStatus =
+                    "\(existingTarget.label) has no Codex usage available yet."
+                scheduleAutomaticTaskContinuationRetry(
+                    eventKey: eventKey,
+                    after: 5 * 60
+                )
+                return
+            } else {
+                automaticTaskContinuationStore.discardPending(id: existingRecord.id)
+                record = nil
+            }
+        } else if let existingRecord {
+            automaticTaskContinuationStore.discardPending(id: existingRecord.id)
+            record = nil
+        }
+
+        if targetProfile == nil {
+            automaticTaskContinuationStatus = "Checking another Codex account..."
+            for profile in CodexAutomaticTaskContinuationPolicy.orderedTargetProfiles(
+                profiles,
+                after: sourceProfileID
+            ) where profile.id != sourceProfileID {
+                if await profileCanContinue(profile) {
+                    targetProfile = profile
+                    break
+                }
+            }
+        }
+
+        guard let targetProfile else {
+            automaticTaskContinuationStatus =
+                "No signed-in Codex profile with available usage is ready."
+            scheduleAutomaticTaskContinuationRetry(
+                eventKey: eventKey,
+                after: 5 * 60
+            )
+            return
+        }
+
+        if record == nil {
+            record = CodexAutomaticTaskContinuationRecord(
+                id: UUID(),
+                eventKey: eventKey,
+                threadID: threadID,
+                sourceProfileID: sourceProfileID,
+                targetProfileID: targetProfile.id,
+                stage: .planned
+            )
+            automaticTaskContinuationStore.savePending(record!)
+        }
+        guard var record else { return }
+
+        guard
+            let currentItem = currentAutomaticTaskContinuationItem(
+                matching: originalItem
+            )
+        else {
+            automaticTaskContinuationStore.markCompleted(record)
+            automaticTaskContinuationStatus =
+                "Automatic continuation stopped because the task state changed."
+            return
+        }
+
+        let currentBinding = currentItem.threadID.flatMap(codexThreadProfileIDProvider)
+        if currentBinding != targetProfile.id {
+            guard record.stage == .planned else {
+                automaticTaskContinuationStatus =
+                    "Automatic continuation is waiting for the account handoff to settle."
+                scheduleAutomaticTaskContinuationRetry(
+                    eventKey: eventKey,
+                    after: 2 * 60
+                )
+                return
+            }
+            guard
+                let currentThreadID = currentItem.threadID,
+                let rolloutURL = currentItem.rolloutURL
+            else {
+                automaticTaskContinuationStore.markCompleted(record)
+                return
+            }
+
+            automaticTaskContinuationStatus =
+                "Moving \(currentItem.title) to \(targetProfile.label)..."
+            do {
+                _ = try await codexAccountHandoffSubmitter(
+                    currentThreadID,
+                    rolloutURL,
+                    false,
+                    targetProfile
+                )
+                record.stage = .handedOff
+                automaticTaskContinuationStore.savePending(record)
+            } catch {
+                automaticTaskContinuationStatus =
+                    "Could not continue with \(targetProfile.label): \(error.localizedDescription)"
+                scheduleAutomaticTaskContinuationRetry(
+                    eventKey: eventKey,
+                    after: 2 * 60
+                )
+                return
+            }
+        } else if record.stage == .planned {
+            record.stage = .handedOff
+            automaticTaskContinuationStore.savePending(record)
+        }
+
+        guard automaticallyContinuesQuotaInterruptedTasksAcrossAccounts else { return }
+        automaticTaskContinuationStatus =
+            "Continuing \(currentItem.title) with \(targetProfile.label)..."
+        let outcome = await codexPromptSubmitter(
+            "continue",
+            record.threadID,
+            currentItem.cwd,
+            .reply,
+            nil,
+            "companion-auto-task-\(record.id.uuidString.lowercased())",
+            {}
+        )
+
+        if outcome == .sent {
+            automaticTaskContinuationStore.markCompleted(record)
+            automaticTaskContinuationRetryAfter.removeValue(forKey: eventKey)
+            automaticTaskContinuationRetryAfter.removeValue(forKey: candidateRetryKey)
+            automaticTaskContinuationStatus =
+                "Continued \(currentItem.title) with \(targetProfile.label)."
+            CodexSendLog.append(
+                "automatic task continuation sent thread=\(record.threadID) source=\(record.sourceProfileID.uuidString) target=\(targetProfile.id.uuidString)"
+            )
+            processStore.refresh()
+        } else {
+            automaticTaskContinuationStatus =
+                "The account changed, but Codex did not accept the automatic continue message."
+            scheduleAutomaticTaskContinuationRetry(
+                eventKey: eventKey,
+                after: 2 * 60
+            )
+        }
+    }
+
+    private func readUsage(
+        for profile: CodexAccountProfile
+    ) async -> Result<CodexUsageSnapshot, Error> {
+        guard await codexAccountProfileAuthenticationChecker(profile) == .signedIn else {
+            return .failure(CodexAutomaticTaskContinuationError.profileNotSignedIn)
+        }
+        let reader = codexAccountProfileUsageReader
+        return await Task.detached(priority: .utility) {
+            Result { try reader(profile) }
+        }.value
+    }
+
+    private func currentAutomaticTaskContinuationItem(
+        matching originalItem: CodexProcessItem
+    ) -> CodexProcessItem? {
+        let current = processStore.items.first {
+            $0.threadID == originalItem.threadID
+        }
+        let candidate = current ?? (processStore.items.isEmpty ? originalItem : nil)
+        guard
+            let candidate,
+            CodexAutomaticTaskContinuationPolicy.isCandidate(candidate)
+        else {
+            return nil
+        }
+        return candidate
+    }
+
+    private func automaticTaskCandidateRetryKey(
+        for item: CodexProcessItem
+    ) -> String {
+        "candidate|\(item.threadID ?? item.id)"
+    }
+
+    private func automaticTaskRetryIsReady(
+        for eventKey: String,
+        now: Date = Date()
+    ) -> Bool {
+        automaticTaskContinuationRetryAfter[eventKey].map { $0 <= now } ?? true
+    }
+
+    private func scheduleAutomaticTaskContinuationRetry(
+        eventKey: String,
+        after delay: TimeInterval
+    ) {
+        automaticTaskContinuationRetryAfter[eventKey] = Date().addingTimeInterval(delay)
+    }
+
+    func dismissAccountHandoffFeedback(for processID: String) {
+        guard accountHandoffFeedback?.processID == processID else { return }
+        accountHandoffFeedback = nil
+    }
+
+    private func failAccountHandoff(for processID: String, message: String) {
+        if isSwitchingAccountForProcessID == processID {
+            isSwitchingAccountForProcessID = nil
+        }
+        accountHandoffError = message
+        accountHandoffFeedback = CodexAccountHandoffFeedback(
+            processID: processID,
+            message: message,
+            isError: true
+        )
+        status = message
     }
 
     var renderedPetState: PetAnimationState {
@@ -1621,6 +2419,9 @@ final class CompanionAppModel: ObservableObject {
     }
 
     private func handleProcessTransitions(_ items: [CodexProcessItem]) {
+        evaluateAutomaticGoalContinuation(for: items)
+        evaluateAutomaticTaskContinuation(for: items)
+
         let nextSnapshots = Dictionary(uniqueKeysWithValues: items.map {
             ($0.id, PetProcessSnapshot(item: $0))
         })
@@ -1912,6 +2713,12 @@ private struct CodexSendIdentity: Equatable, Sendable {
 
 struct CodexComposerFeedback: Equatable, Sendable {
     var text: String
+    var isError: Bool
+}
+
+struct CodexAccountHandoffFeedback: Equatable, Sendable {
+    var processID: String
+    var message: String
     var isError: Bool
 }
 

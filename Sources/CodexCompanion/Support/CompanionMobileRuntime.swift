@@ -62,6 +62,11 @@ struct CompanionMobileRuntimePolicy {
 protocol CompanionMobileRuntimeService: AnyObject {
     func start()
     func stop()
+    func resumeAfterWake()
+}
+
+extension CompanionMobileRuntimeService {
+    func resumeAfterWake() {}
 }
 
 extension CodexCompanionMobileBridgeServer: CompanionMobileRuntimeService {}
@@ -142,6 +147,10 @@ final class CompanionMobileRuntimeController: ObservableObject {
 
     func shutdown() {
         stopRuntime()
+    }
+
+    func resumeAfterWake() {
+        bridge?.resumeAfterWake()
     }
 
     private func stopRuntime() {

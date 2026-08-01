@@ -6,6 +6,7 @@ struct CodexAppServerCapabilityService: Sendable {
     func load(cwd: String?) throws -> CompanionBridgeCapabilities {
         let resolvedCWD = Self.nonempty(cwd)
             ?? FileManager.default.homeDirectoryForCurrentUser.path
+        let accountStore = CodexAccountProfileStore()
         let responses = try client.perform([
             CodexControlRequestFactory.modelsList(id: 2),
             CodexControlRequestFactory.skillsList(id: 3, cwd: resolvedCWD),
@@ -19,7 +20,11 @@ struct CodexAppServerCapabilityService: Sendable {
             chatModels: Self.chatModels(
                 hasOpenAIKey: OpenAIAPIKeyStore().hasKey,
                 hasLumoKey: LumoAPIKeyStore().hasKey
-            )
+            ),
+            accountProfiles: accountStore.profiles.map {
+                CompanionBridgeAccountProfile(id: $0.id, label: $0.label)
+            },
+            selectedAccountProfileID: accountStore.selectedProfileID
         )
     }
 

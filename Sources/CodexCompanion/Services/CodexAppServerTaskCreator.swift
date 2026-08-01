@@ -7,6 +7,31 @@ enum CodexAppServerTaskCreationOutcome: Equatable, Sendable {
     case failed
 }
 
+struct CodexAppServerTaskCreationRequest: Sendable {
+    var prompt: String
+    var cwd: String?
+    var model: String?
+    var reasoningEffort: String?
+    var skillName: String?
+    var skillPath: String?
+    var attachments: [CodexFollowerAttachment]
+    var clientMessageID: String
+}
+
+typealias CodexSelectedAccountProfileProvider = @Sendable () -> CodexAccountProfile?
+typealias CodexAccountProfileProvider = @Sendable (_ profileID: UUID) -> CodexAccountProfile?
+typealias CodexSharedTaskCreator = @Sendable (
+    _ request: CodexAppServerTaskCreationRequest
+) async -> CodexAppServerTaskCreationOutcome
+typealias CodexProfileTaskCreator = @Sendable (
+    _ profile: CodexAccountProfile,
+    _ request: CodexAppServerTaskCreationRequest
+) async -> CodexAppServerTaskCreationOutcome
+typealias CodexAccountProfileBinder = @Sendable (
+    _ threadID: String,
+    _ profileID: UUID
+) -> Void
+
 enum CodexAppServerTaskRequestFactory {
     static func threadStart(id: Int, cwd: String?, model: String? = nil) -> [String: Any] {
         var params: [String: Any] = [
@@ -88,6 +113,39 @@ enum CodexAppServerTaskResponseParser {
 }
 
 final class CodexAppServerTaskCreator {
+    private let selectedProfileProvider: CodexSelectedAccountProfileProvider
+    private let profileProvider: CodexAccountProfileProvider
+    private let sharedTaskCreator: CodexSharedTaskCreator
+    private let profileTaskCreator: CodexProfileTaskCreator
+    private let profileBinder: CodexAccountProfileBinder
+
+    init(
+        selectedProfileProvider: @escaping CodexSelectedAccountProfileProvider = {
+            CodexAccountProfileRouteResolver().selectedProfile()
+        },
+        profileProvider: @escaping CodexAccountProfileProvider = { profileID in
+            CodexAccountProfileStore().profiles.first { $0.id == profileID }
+        },
+        sharedTaskCreator: @escaping CodexSharedTaskCreator = { request in
+            await CodexAppServerTaskCreator.createThroughSharedProxy(request)
+        },
+        profileTaskCreator: @escaping CodexProfileTaskCreator = { profile, request in
+            await CodexAppServerTaskCreator.createThroughProfileProxy(
+                profile: profile,
+                request: request
+            )
+        },
+        profileBinder: @escaping CodexAccountProfileBinder = { threadID, profileID in
+            CodexThreadAccountProfileBindingStore().bind(threadID: threadID, to: profileID)
+        }
+    ) {
+        self.selectedProfileProvider = selectedProfileProvider
+        self.profileProvider = profileProvider
+        self.sharedTaskCreator = sharedTaskCreator
+        self.profileTaskCreator = profileTaskCreator
+        self.profileBinder = profileBinder
+    }
+
     func create(
         prompt: String,
         cwd: String?,
@@ -95,11 +153,47 @@ final class CodexAppServerTaskCreator {
         reasoningEffort: String? = nil,
         skillName: String? = nil,
         skillPath: String? = nil,
+        accountProfileID: UUID? = nil,
         attachments: [CodexFollowerAttachment] = [],
         clientMessageID: String = UUID().uuidString
     ) async -> CodexAppServerTaskCreationOutcome {
         let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPrompt.isEmpty else { return .failed }
+        let request = CodexAppServerTaskCreationRequest(
+            prompt: trimmedPrompt,
+            cwd: cwd?.trimmingCharacters(in: .whitespacesAndNewlines),
+            model: model,
+            reasoningEffort: reasoningEffort,
+            skillName: skillName,
+            skillPath: skillPath,
+            attachments: attachments,
+            clientMessageID: clientMessageID
+        )
+
+        let profile: CodexAccountProfile?
+        if let accountProfileID {
+            guard let requestedProfile = profileProvider(accountProfileID) else {
+                CodexSendLog.append("task-creator requested account profile is unavailable")
+                return .failed
+            }
+            profile = requestedProfile
+        } else {
+            profile = selectedProfileProvider()
+        }
+
+        if let profile {
+            let outcome = await profileTaskCreator(profile, request)
+            if case .created(let threadID) = outcome {
+                profileBinder(threadID, profile.id)
+            }
+            return outcome
+        }
+        return await sharedTaskCreator(request)
+    }
+
+    private static func createThroughSharedProxy(
+        _ request: CodexAppServerTaskCreationRequest
+    ) async -> CodexAppServerTaskCreationOutcome {
         guard FileManager.default.fileExists(atPath: CodexAppServerSender.sharedDaemonSocketURL.path) else {
             CodexSendLog.append("task-creator shared app-server socket is unavailable")
             return .sharedDaemonUnavailable
@@ -110,19 +204,55 @@ final class CodexAppServerTaskCreator {
             })
         else { return .failed }
 
+        return await createThroughProxy(
+            request,
+            executableURL: executableURL,
+            environmentOverrides: [:]
+        )
+    }
+
+    private static func createThroughProfileProxy(
+        profile: CodexAccountProfile,
+        request: CodexAppServerTaskCreationRequest
+    ) async -> CodexAppServerTaskCreationOutcome {
+        let command: CodexAccountProfileDaemonCommand
+        do {
+            command = try await CodexAccountProfileDaemonCoordinator.shared.ensureRunning(
+                for: profile
+            )
+        } catch {
+            CodexSendLog.append(
+                "task-creator profile daemon unavailable profile=\(profile.id.uuidString) error=\(error.localizedDescription)"
+            )
+            return .sharedDaemonUnavailable
+        }
+
+        return await createThroughProxy(
+            request,
+            executableURL: command.executableURL,
+            environmentOverrides: command.environmentOverrides
+        )
+    }
+
+    private static func createThroughProxy(
+        _ request: CodexAppServerTaskCreationRequest,
+        executableURL: URL,
+        environmentOverrides: [String: String]
+    ) async -> CodexAppServerTaskCreationOutcome {
         let handle = CodexAppServerTaskCreationSessionHandle()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 let session = CodexAppServerTaskCreationSession(
                     executableURL: executableURL,
-                    prompt: trimmedPrompt,
-                    cwd: cwd?.trimmingCharacters(in: .whitespacesAndNewlines),
-                    model: model,
-                    reasoningEffort: reasoningEffort,
-                    skillName: skillName,
-                    skillPath: skillPath,
-                    attachments: attachments,
-                    clientMessageID: clientMessageID,
+                    environmentOverrides: environmentOverrides,
+                    prompt: request.prompt,
+                    cwd: request.cwd,
+                    model: request.model,
+                    reasoningEffort: request.reasoningEffort,
+                    skillName: request.skillName,
+                    skillPath: request.skillPath,
+                    attachments: request.attachments,
+                    clientMessageID: request.clientMessageID,
                     completion: { outcome in
                         continuation.resume(returning: outcome)
                     }
@@ -147,6 +277,7 @@ private final class CodexAppServerTaskCreationSession {
     }
 
     private let executableURL: URL
+    private let environmentOverrides: [String: String]
     private let prompt: String
     private let cwd: String?
     private let model: String?
@@ -170,6 +301,7 @@ private final class CodexAppServerTaskCreationSession {
 
     init(
         executableURL: URL,
+        environmentOverrides: [String: String] = [:],
         prompt: String,
         cwd: String?,
         model: String?,
@@ -181,6 +313,7 @@ private final class CodexAppServerTaskCreationSession {
         completion: @escaping @Sendable (CodexAppServerTaskCreationOutcome) -> Void
     ) {
         self.executableURL = executableURL
+        self.environmentOverrides = environmentOverrides
         self.prompt = prompt
         self.cwd = cwd
         self.model = model
@@ -195,6 +328,11 @@ private final class CodexAppServerTaskCreationSession {
     func start() {
         process.executableURL = executableURL
         process.arguments = ["app-server", "proxy"]
+        if !environmentOverrides.isEmpty {
+            var environment = ProcessInfo.processInfo.environment
+            environmentOverrides.forEach { environment[$0.key] = $0.value }
+            process.environment = environment
+        }
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe

@@ -117,6 +117,13 @@ enum CompanionBridgeSecurity {
             return .rejectExpired
         }
 
+        if let activePairing,
+           activePairing.expiresAt >= now,
+           normalizedPairingCode(activePairing.code) == normalizedPairingCode(invitation.pairingCode),
+           normalizedPairingCode(activePairing.code)?.count == 6 {
+            return .acceptPairing
+        }
+
         if let trustedSecret {
             guard trustedSecret.count >= 32,
                   let authenticator = invitation.authenticator,
@@ -127,13 +134,6 @@ enum CompanionBridgeSecurity {
                   )
             else { return .rejectAuthentication }
             return .acceptTrusted
-        }
-
-        if let activePairing,
-           activePairing.expiresAt >= now,
-           normalizedPairingCode(activePairing.code) == normalizedPairingCode(invitation.pairingCode),
-           normalizedPairingCode(activePairing.code)?.count == 6 {
-            return .acceptPairing
         }
 
         return .rejectUnpaired

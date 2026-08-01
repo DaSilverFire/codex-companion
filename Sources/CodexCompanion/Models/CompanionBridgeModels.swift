@@ -15,6 +15,7 @@ enum CompanionBridgeOperation: String, Codable, Sendable {
     case sendMessage
     case respondToApproval
     case createTask
+    case switchTaskAccount
     case loadCapabilities
     case sendCasualChat
     case loadUsage
@@ -162,6 +163,7 @@ struct CompanionBridgeRequest: Codable, Equatable, Sendable {
     var chatAgentID: String?
     var chatProvider: CompanionBridgeChatProvider?
     var chatModelID: String?
+    var accountProfileID: UUID?
     var resetCreditID: String?
     var attachments: [CompanionBridgeAttachment]?
     var idempotencyKey: UUID?
@@ -185,6 +187,7 @@ struct CompanionBridgeRequest: Codable, Equatable, Sendable {
         chatAgentID: String? = nil,
         chatProvider: CompanionBridgeChatProvider? = nil,
         chatModelID: String? = nil,
+        accountProfileID: UUID? = nil,
         resetCreditID: String? = nil,
         attachments: [CompanionBridgeAttachment]? = nil,
         idempotencyKey: UUID? = nil
@@ -207,6 +210,7 @@ struct CompanionBridgeRequest: Codable, Equatable, Sendable {
         self.chatAgentID = chatAgentID
         self.chatProvider = chatProvider
         self.chatModelID = chatModelID
+        self.accountProfileID = accountProfileID
         self.resetCreditID = resetCreditID
         self.attachments = attachments
         self.idempotencyKey = idempotencyKey
@@ -232,6 +236,7 @@ struct CompanionBridgeResponse: Codable, Equatable, Sendable {
     var messages: [CompanionBridgeMessage]?
     var nextCursor: String?
     var threadID: String?
+    var mainThreadID: String? = nil
     var capabilities: CompanionBridgeCapabilities?
     var chatMessage: CompanionBridgeMessage?
     var timelineItems: [CompanionBridgeTimelineItem]?
@@ -241,6 +246,8 @@ struct CompanionBridgeResponse: Codable, Equatable, Sendable {
     var contextUsage: CompanionBridgeContextUsage?
     var usageSnapshot: CompanionBridgeUsageSnapshot?
     var goal: CompanionBridgeGoal?
+    var accountProfileID: UUID?
+    var accountProfileLabel: String?
 
     static func success(
         for request: CompanionBridgeRequest,
@@ -253,6 +260,7 @@ struct CompanionBridgeResponse: Codable, Equatable, Sendable {
         messages: [CompanionBridgeMessage]? = nil,
         nextCursor: String? = nil,
         threadID: String? = nil,
+        mainThreadID: String? = nil,
         capabilities: CompanionBridgeCapabilities? = nil,
         chatMessage: CompanionBridgeMessage? = nil,
         timelineItems: [CompanionBridgeTimelineItem]? = nil,
@@ -261,7 +269,9 @@ struct CompanionBridgeResponse: Codable, Equatable, Sendable {
         subagents: [CompanionBridgeSubagent]? = nil,
         contextUsage: CompanionBridgeContextUsage? = nil,
         usageSnapshot: CompanionBridgeUsageSnapshot? = nil,
-        goal: CompanionBridgeGoal? = nil
+        goal: CompanionBridgeGoal? = nil,
+        accountProfileID: UUID? = nil,
+        accountProfileLabel: String? = nil
     ) -> CompanionBridgeResponse {
         CompanionBridgeResponse(
             id: request.id,
@@ -276,6 +286,7 @@ struct CompanionBridgeResponse: Codable, Equatable, Sendable {
             messages: messages,
             nextCursor: nextCursor,
             threadID: threadID,
+            mainThreadID: mainThreadID,
             capabilities: capabilities,
             chatMessage: chatMessage,
             timelineItems: timelineItems,
@@ -284,7 +295,9 @@ struct CompanionBridgeResponse: Codable, Equatable, Sendable {
             subagents: subagents,
             contextUsage: contextUsage,
             usageSnapshot: usageSnapshot,
-            goal: goal
+            goal: goal,
+            accountProfileID: accountProfileID,
+            accountProfileLabel: accountProfileLabel
         )
     }
 
@@ -316,6 +329,8 @@ struct CompanionBridgeContextUsage: Codable, Equatable, Sendable {
 }
 
 struct CompanionBridgeUsageSnapshot: Codable, Equatable, Sendable {
+    var accountProfileID: UUID? = nil
+    var accountProfileLabel: String? = nil
     var planType: String?
     var groups: [CompanionBridgeUsageGroup]
     var availableResetCount: Int
@@ -354,6 +369,8 @@ struct CompanionBridgeTask: Codable, Equatable, Identifiable, Sendable {
     var activeTurnID: String?
     var model: String?
     var reasoningEffort: String?
+    var accountProfileID: UUID? = nil
+    var accountProfileLabel: String? = nil
     var taskGroup: CompanionBridgeTaskGroup? = nil
     var goal: CompanionBridgeGoal? = nil
 }
@@ -375,6 +392,7 @@ struct CompanionBridgeMedia: Codable, Equatable, Identifiable, Sendable {
 
 struct CompanionBridgeTimelineItem: Codable, Equatable, Identifiable, Sendable {
     var id: String
+    var groupHeadID: String? = nil
     var kind: CompanionBridgeTimelineItemKind
     var status: CompanionBridgeTimelineItemStatus = .completed
     var role: CompanionBridgeMessageRole? = nil
@@ -404,6 +422,13 @@ struct CompanionBridgeCapabilities: Codable, Equatable, Sendable {
     var plugins: [CompanionBridgePlugin]
     var chatAgents: [CompanionBridgeChatAgent]
     var chatModels: [CompanionBridgeChatModel]? = nil
+    var accountProfiles: [CompanionBridgeAccountProfile]? = nil
+    var selectedAccountProfileID: UUID? = nil
+}
+
+struct CompanionBridgeAccountProfile: Codable, Equatable, Identifiable, Sendable {
+    var id: UUID
+    var label: String
 }
 
 struct CompanionBridgeChatModel: Codable, Equatable, Identifiable, Sendable {

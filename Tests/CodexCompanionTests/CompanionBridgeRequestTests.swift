@@ -89,4 +89,73 @@ struct CompanionBridgeRequestTests {
         #expect(message.text == "Ready")
         #expect(message.attachments == nil)
     }
+
+    @Test
+    func accountProfileSelectionSurvivesBridgeRoundTrip() throws {
+        let profileID = UUID()
+        let request = CompanionBridgeRequest(
+            operation: .createTask,
+            text: "Create this task on the selected account",
+            accountProfileID: profileID
+        )
+
+        let decoded = try JSONDecoder().decode(
+            CompanionBridgeRequest.self,
+            from: JSONEncoder().encode(request)
+        )
+
+        #expect(decoded.accountProfileID == profileID)
+    }
+
+    @Test
+    func existingTaskAccountHandoffSurvivesBridgeRoundTrip() throws {
+        let profileID = UUID()
+        let request = CompanionBridgeRequest(
+            operation: .switchTaskAccount,
+            threadID: "thread-account-handoff",
+            accountProfileID: profileID
+        )
+
+        let decoded = try JSONDecoder().decode(
+            CompanionBridgeRequest.self,
+            from: JSONEncoder().encode(request)
+        )
+
+        #expect(decoded.operation == .switchTaskAccount)
+        #expect(decoded.threadID == "thread-account-handoff")
+        #expect(decoded.accountProfileID == profileID)
+    }
+
+    @Test
+    func olderCapabilityPayloadDecodesWithoutAccountProfiles() throws {
+        let payload = Data(
+            #"{"models":[],"skills":[],"plugins":[],"chatAgents":[]}"#.utf8
+        )
+
+        let capabilities = try JSONDecoder().decode(
+            CompanionBridgeCapabilities.self,
+            from: payload
+        )
+
+        #expect(capabilities.accountProfiles == nil)
+        #expect(capabilities.selectedAccountProfileID == nil)
+    }
+
+    @Test
+    func unavailableTaskCreationReportsTheAccountServiceInsteadOfRequestingARestart() {
+        let request = CompanionBridgeRequest(
+            operation: .createTask,
+            text: "Create a mobile task"
+        )
+
+        let response = CodexCompanionMobileBridgeServer.createTaskResponse(
+            for: request,
+            outcome: .sharedDaemonUnavailable
+        )
+
+        #expect(!response.succeeded)
+        #expect(response.errorCode == "native_transport_unavailable")
+        #expect(response.message?.contains("account service") == true)
+        #expect(response.message?.contains("Restart ChatGPT") == false)
+    }
 }

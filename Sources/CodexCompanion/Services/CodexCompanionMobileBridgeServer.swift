@@ -17,7 +17,28 @@ typealias CompanionTaskMessageSender = @Sendable (
     _ attachments: [CodexFollowerAttachment]
 ) async -> CodexAppServerSendOutcome
 
+typealias CompanionAccountProfileUsageReader = @Sendable (
+    _ profile: CodexAccountProfile
+) throws -> CodexUsageSnapshot
+
+typealias CompanionAccountProfileResetConsumer = @Sendable (
+    _ profile: CodexAccountProfile,
+    _ creditID: String,
+    _ idempotencyKey: UUID
+) throws -> CodexResetConsumeOutcome
+
+typealias CompanionThreadAccountProfileIDProvider = @Sendable (_ threadID: String) -> UUID?
+
+typealias CompanionThreadAccountHandoffSubmitter = @Sendable (
+    _ threadID: String,
+    _ rolloutURL: URL,
+    _ hasActiveTurn: Bool,
+    _ profile: CodexAccountProfile
+) throws -> CodexThreadAccountHandoffResult
+
 final class CodexCompanionMobileBridgeServer: NSObject {
+    static let subagentHistoryLimit = CompanionBridgeProtocol.maximumPageSize
+
     private struct RelayEndpoint {
         var generation: UUID
         var url: URL
@@ -52,7 +73,13 @@ final class CodexCompanionMobileBridgeServer: NSObject {
     private let lumoAPIKeyProvider: () -> String?
     private let threadSettingsUpdater: CompanionThreadSettingsUpdater
     private let taskMessageSender: CompanionTaskMessageSender
+    private let accountProfileProvider: CodexAccountProfileProvider
+    private let threadAccountProfileIDProvider: CompanionThreadAccountProfileIDProvider
+    private let threadAccountHandoffSubmitter: CompanionThreadAccountHandoffSubmitter
+    private let accountProfileUsageReader: CompanionAccountProfileUsageReader
+    private let accountProfileResetConsumer: CompanionAccountProfileResetConsumer
     private let historyLoadCoordinator = CompanionHistoryLoadCoordinator()
+    private let createTaskRequestCoordinator = CompanionBridgeRequestCoordinator()
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private let pairingCoordinator: CompanionPairingCoordinator
@@ -101,6 +128,24 @@ final class CodexCompanionMobileBridgeServer: NSObject {
                 onQueued: {},
                 attachments: attachments
             )
+        },
+        accountProfileProvider: @escaping CodexAccountProfileProvider = { profileID in
+            CodexAccountProfileStore().profiles.first { $0.id == profileID }
+        },
+        threadAccountProfileIDProvider: @escaping CompanionThreadAccountProfileIDProvider = { threadID in
+            CodexThreadAccountProfileBindingStore().profileID(for: threadID)
+        },
+        threadAccountHandoffSubmitter: CompanionThreadAccountHandoffSubmitter? = nil,
+        accountProfileUsageReader: @escaping CompanionAccountProfileUsageReader = { profile in
+            try CodexAccountProfileUsageService().readUsage(for: profile)
+        },
+        accountProfileResetConsumer: @escaping CompanionAccountProfileResetConsumer = {
+            profile, creditID, idempotencyKey in
+            try CodexAccountProfileUsageService().consumeReset(
+                for: profile,
+                creditID: creditID,
+                idempotencyKey: idempotencyKey
+            )
         }
     ) {
         let computerName = Host.current().localizedName?
@@ -118,6 +163,19 @@ final class CodexCompanionMobileBridgeServer: NSObject {
         self.pairingCoordinator = pairingCoordinator
         self.threadSettingsUpdater = threadSettingsUpdater
         self.taskMessageSender = taskMessageSender
+        self.accountProfileProvider = accountProfileProvider
+        self.threadAccountProfileIDProvider = threadAccountProfileIDProvider
+        self.threadAccountHandoffSubmitter = threadAccountHandoffSubmitter ?? {
+            threadID, rolloutURL, hasActiveTurn, profile in
+            try CodexThreadAccountHandoffService().handoff(
+                threadID: threadID,
+                rolloutURL: rolloutURL,
+                hasActiveTurn: hasActiveTurn,
+                to: profile
+            )
+        }
+        self.accountProfileUsageReader = accountProfileUsageReader
+        self.accountProfileResetConsumer = accountProfileResetConsumer
         encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .millisecondsSince1970
         decoder = JSONDecoder()
@@ -162,6 +220,20 @@ final class CodexCompanionMobileBridgeServer: NSObject {
             pendingPairingByPeerName.removeAll()
         }
         CodexSendLog.append("mobile bridge stopped")
+    }
+
+    func resumeAfterWake() {
+        guard lifecycleLock.withLock({ isRunning }) else { return }
+        let connections = relayLock.withLock {
+            relayEndpointsByDeviceID.values.map(\.connection)
+        }
+        for connection in connections {
+            Task { await connection.resumeAfterWake() }
+        }
+        synchronizeRelayConnections()
+        CodexSendLog.append(
+            "mobile bridge recovering relay connections after system wake"
+        )
     }
 
     private func receive(_ data: Data, from peer: MCPeerID) {
@@ -235,12 +307,21 @@ final class CodexCompanionMobileBridgeServer: NSObject {
                 )
             case .listTasks:
                 let page = try archive.tasks(cursor: request.cursor, limit: request.limit)
+                let accountAnnotatedTasks = page.tasks.map { task in
+                    var task = task
+                    guard let profileID = threadAccountProfileIDProvider(task.id) else {
+                        return task
+                    }
+                    task.accountProfileID = profileID
+                    task.accountProfileLabel = accountProfileProvider(profileID)?.label
+                    return task
+                }
                 let goals = (try? goalControlService.readGoals(
-                    threadIDs: page.tasks.map(\.id)
+                    threadIDs: accountAnnotatedTasks.map(\.id)
                 )) ?? [:]
                 return .success(
                     for: request,
-                    tasks: Self.attachingGoals(goals, to: page.tasks),
+                    tasks: Self.attachingGoals(goals, to: accountAnnotatedTasks),
                     nextCursor: page.nextCursor
                 )
             case .loadMessages:
@@ -270,13 +351,18 @@ final class CodexCompanionMobileBridgeServer: NSObject {
                         cursor: cursor,
                         limit: limit
                     )
+                    let subagentFamily = try archive.subagentFamily(
+                        threadID: threadID,
+                        limit: Self.subagentHistoryLimit
+                    )
                     return CompanionHistorySnapshot(
                         messages: page.messages,
                         nextCursor: page.nextCursor,
                         timelineItems: timeline.items,
                         revision: timeline.revision,
                         timelineNextCursor: timeline.nextCursor,
-                        subagents: try archive.subagents(parentThreadID: threadID, limit: 8),
+                        mainThreadID: subagentFamily.mainThreadID,
+                        subagents: subagentFamily.subagents,
                         contextUsage: timeline.contextUsage
                     )
                 }
@@ -285,6 +371,7 @@ final class CodexCompanionMobileBridgeServer: NSObject {
                     messages: snapshot.messages,
                     nextCursor: snapshot.nextCursor,
                     threadID: threadID,
+                    mainThreadID: snapshot.mainThreadID,
                     timelineItems: snapshot.timelineItems,
                     revision: snapshot.revision,
                     timelineNextCursor: snapshot.timelineNextCursor,
@@ -296,7 +383,18 @@ final class CodexCompanionMobileBridgeServer: NSObject {
             case .respondToApproval:
                 return await respondToApproval(request)
             case .createTask:
-                return await createTask(request)
+                return await createTaskRequestCoordinator.response(for: request.id) { [weak self] in
+                    guard let self else {
+                        return .failure(
+                            for: request,
+                            code: "bridge_stopped",
+                            message: "Codex Companion stopped before the task could be created."
+                        )
+                    }
+                    return await self.createTask(request)
+                }
+            case .switchTaskAccount:
+                return switchTaskAccount(request)
             case .loadCapabilities:
                 let capabilities = try capabilityService.load(cwd: request.cwd)
                 return .success(for: request, capabilities: capabilities)
@@ -419,17 +517,86 @@ final class CodexCompanionMobileBridgeServer: NSObject {
 
     private func loadUsage(_ request: CompanionBridgeRequest) -> CompanionBridgeResponse {
         do {
-            let snapshot = try CodexAppServerControlService.shared.readRateLimits(
-                as: CodexUsageSnapshot.self
-            )
+            let profile: CodexAccountProfile?
+            let snapshot: CodexUsageSnapshot
+            if let profileID = request.accountProfileID {
+                guard let requestedProfile = accountProfileProvider(profileID) else {
+                    return unknownAccountProfileFailure(for: request)
+                }
+                profile = requestedProfile
+                snapshot = try accountProfileUsageReader(requestedProfile)
+            } else {
+                profile = nil
+                snapshot = try CodexAppServerControlService.shared.readRateLimits(
+                    as: CodexUsageSnapshot.self
+                )
+            }
             return .success(
                 for: request,
-                usageSnapshot: CompanionBridgeUsageSnapshot(snapshot: snapshot)
+                usageSnapshot: CompanionBridgeUsageSnapshot(
+                    snapshot: snapshot,
+                    accountProfileID: profile?.id,
+                    accountProfileLabel: profile?.label
+                )
             )
         } catch {
             return .failure(
                 for: request,
                 code: "usage_unavailable",
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private func switchTaskAccount(
+        _ request: CompanionBridgeRequest
+    ) -> CompanionBridgeResponse {
+        guard let threadID = request.threadID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !threadID.isEmpty
+        else {
+            return .failure(for: request, code: "missing_thread", message: "Choose a task first.")
+        }
+        guard let profileID = request.accountProfileID,
+              let profile = accountProfileProvider(profileID)
+        else {
+            return unknownAccountProfileFailure(for: request)
+        }
+
+        do {
+            let context = try archive.accountHandoffContext(threadID: threadID)
+            let result = try threadAccountHandoffSubmitter(
+                threadID,
+                context.rolloutURL,
+                context.hasActiveTurn,
+                profile
+            )
+            guard result.threadID == threadID,
+                  result.profileID == profile.id,
+                  result.rolloutURL.standardizedFileURL == context.rolloutURL.standardizedFileURL
+            else {
+                return .failure(
+                    for: request,
+                    code: "account_handoff_mismatch",
+                    message: "Codex resumed a different task or account, so the account was not changed."
+                )
+            }
+            return .success(
+                for: request,
+                message: "Task will resume with \(profile.label).",
+                threadID: threadID,
+                accountProfileID: profile.id,
+                accountProfileLabel: profile.label
+            )
+        } catch CodexThreadAccountHandoffError.activeTurn {
+            return .failure(
+                for: request,
+                code: "account_handoff_active",
+                message: CodexThreadAccountHandoffError.activeTurn.localizedDescription
+            )
+        } catch {
+            return .failure(
+                for: request,
+                code: "account_handoff_failed",
                 message: error.localizedDescription
             )
         }
@@ -448,14 +615,33 @@ final class CodexCompanionMobileBridgeServer: NSObject {
         }
 
         do {
-            let outcome = try CodexAppServerControlService.shared.consumeResetCredit(
-                creditID: creditID,
-                idempotencyKey: idempotencyKey
-            )
+            let profile: CodexAccountProfile?
+            let outcome: CodexResetConsumeOutcome
+            if let profileID = request.accountProfileID {
+                guard let requestedProfile = accountProfileProvider(profileID) else {
+                    return unknownAccountProfileFailure(for: request)
+                }
+                profile = requestedProfile
+                outcome = try accountProfileResetConsumer(
+                    requestedProfile,
+                    creditID,
+                    idempotencyKey
+                )
+            } else {
+                profile = nil
+                outcome = try CodexAppServerControlService.shared.consumeResetCredit(
+                    creditID: creditID,
+                    idempotencyKey: idempotencyKey
+                )
+            }
             let message: String
             switch outcome {
             case .reset:
-                message = "Codex usage reset applied."
+                if let profile {
+                    message = "Codex usage reset applied for \(profile.label)."
+                } else {
+                    message = "Codex usage reset applied."
+                }
             case .nothingToReset:
                 message = "There is currently no Codex limit to reset."
             case .noCredit:
@@ -463,11 +649,20 @@ final class CodexCompanionMobileBridgeServer: NSObject {
             case .alreadyRedeemed:
                 message = "That Codex reset was already used."
             }
-            let refreshed = try? CodexAppServerControlService.shared.readRateLimits(
-                as: CodexUsageSnapshot.self
-            )
+            let refreshed: CodexUsageSnapshot?
+            if let profile {
+                refreshed = try? accountProfileUsageReader(profile)
+            } else {
+                refreshed = try? CodexAppServerControlService.shared.readRateLimits(
+                    as: CodexUsageSnapshot.self
+                )
+            }
             let bridgeSnapshot = refreshed.map {
-                CompanionBridgeUsageSnapshot(snapshot: $0)
+                CompanionBridgeUsageSnapshot(
+                    snapshot: $0,
+                    accountProfileID: profile?.id,
+                    accountProfileLabel: profile?.label
+                )
             }
             return .success(
                 for: request,
@@ -481,6 +676,16 @@ final class CodexCompanionMobileBridgeServer: NSObject {
                 message: error.localizedDescription
             )
         }
+    }
+
+    private func unknownAccountProfileFailure(
+        for request: CompanionBridgeRequest
+    ) -> CompanionBridgeResponse {
+        .failure(
+            for: request,
+            code: "unknown_account_profile",
+            message: "That Codex account is no longer available on this Mac. Refresh accounts and choose another one."
+        )
     }
 
     private func createGoal(_ request: CompanionBridgeRequest) -> CompanionBridgeResponse {
@@ -720,8 +925,17 @@ final class CodexCompanionMobileBridgeServer: NSObject {
             reasoningEffort: request.reasoningEffort,
             skillName: request.skillName,
             skillPath: request.skillPath,
-            attachments: stagedAttachments
+            accountProfileID: request.accountProfileID,
+            attachments: stagedAttachments,
+            clientMessageID: request.clientMessageID
         )
+        return Self.createTaskResponse(for: request, outcome: outcome)
+    }
+
+    static func createTaskResponse(
+        for request: CompanionBridgeRequest,
+        outcome: CodexAppServerTaskCreationOutcome
+    ) -> CompanionBridgeResponse {
         switch outcome {
         case .created(let threadID):
             return .success(
@@ -732,8 +946,8 @@ final class CodexCompanionMobileBridgeServer: NSObject {
         case .sharedDaemonUnavailable:
             return .failure(
                 for: request,
-                code: "native_transport_setup_required",
-                message: "Restart ChatGPT once after native Companion transport is enabled. The task was not started."
+                code: "native_transport_unavailable",
+                message: "The selected Codex account service is unavailable. The task was not started."
             )
         case .timedOut:
             return .failure(
@@ -1047,11 +1261,14 @@ extension CodexCompanionMobileBridgeServer: MCNearbyServiceAdvertiserDelegate {
               let invitation = try? decoder.decode(CompanionBridgeInvitation.self, from: context)
         else {
             invitationHandler(false, nil)
-            CodexSendLog.append("mobile bridge rejected unpaired peer=\(peerID.displayName)")
+            CodexSendLog.append(
+                "mobile bridge rejected invitation reason=malformed contextBytes=\(context?.count ?? 0)"
+            )
             return
         }
 
-        switch pairingCoordinator.invitationDecision(invitation) {
+        let decision = pairingCoordinator.invitationDecision(invitation)
+        switch decision {
         case .acceptTrusted:
             markAuthorized(peerID, deviceID: invitation.deviceID)
             invitationHandler(true, session)
@@ -1067,8 +1284,16 @@ extension CodexCompanionMobileBridgeServer: MCNearbyServiceAdvertiserDelegate {
             if relayAuditLogThrottle.shouldRecord(
                 key: "rejected-invitation:\(invitation.deviceID)"
             ) {
+                let auditSummary = CompanionBridgeInvitationAudit.rejectionSummary(
+                    decision: decision,
+                    invitation: invitation,
+                    trustedRecordFound: pairingCoordinator.trustedRecord(
+                        for: invitation.deviceID
+                    ) != nil,
+                    now: Date()
+                )
                 CodexSendLog.append(
-                    "mobile bridge rejected invitation device=\(invitation.deviceID)"
+                    "mobile bridge rejected invitation device=\(invitation.deviceID) \(auditSummary)"
                 )
             }
         }

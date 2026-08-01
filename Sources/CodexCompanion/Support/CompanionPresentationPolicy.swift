@@ -100,7 +100,7 @@ enum CompanionPresentationPolicy {
         isQuickBarOpen: Bool,
         isPetVisible: Bool
     ) -> Bool {
-        isQuickBarOpen && isPetVisible
+        isPetVisible
     }
 
     static func showsPetMenuControls(

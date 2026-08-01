@@ -71,6 +71,16 @@ struct PetDefinition: Identifiable, Hashable {
             || displayName.localizedCaseInsensitiveContains("shadow")
     }
 
+    func frameTiming(
+        for state: PetAnimationState,
+        frameCount: Int
+    ) -> (base: TimeInterval, final: TimeInterval) {
+        state.frameTiming(
+            frameCount: frameCount,
+            preserveCycleDuration: usesShadowStyle && state.loopsContinuously
+        )
+    }
+
     private func defaultFrameCount(for state: PetAnimationState) -> Int {
         switch state {
         case .idle: 6

@@ -152,7 +152,14 @@ struct CodexRateLimitWindow: Decodable, Hashable, Sendable {
 }
 
 extension CompanionBridgeUsageSnapshot {
-    init(snapshot: CodexUsageSnapshot, updatedAt: Date = Date()) {
+    init(
+        snapshot: CodexUsageSnapshot,
+        accountProfileID: UUID? = nil,
+        accountProfileLabel: String? = nil,
+        updatedAt: Date = Date()
+    ) {
+        self.accountProfileID = accountProfileID
+        self.accountProfileLabel = accountProfileLabel
         planType = snapshot.planType
         groups = snapshot.allGroups.map { group in
             CompanionBridgeUsageGroup(

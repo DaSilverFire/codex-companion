@@ -169,6 +169,31 @@ struct CompanionMobileRuntimeTests {
         #expect(releasedPower == nil)
     }
 
+    @MainActor
+    @Test
+    func wakingMacImmediatelyRecoversTheRunningMobileBridge() {
+        let defaults = makeDefaults()
+        defer { clear(defaults) }
+        let bridge = RuntimeServiceSpy()
+        let power = RuntimeServiceSpy()
+        let controller = CompanionMobileRuntimeController(
+            policy: CompanionMobileRuntimePolicy(
+                isBuildAuthorized: true,
+                defaults: defaults
+            ),
+            makeBridge: { bridge },
+            makePowerCoordinator: { power }
+        )
+
+        controller.startIfEnabled()
+        controller.resumeAfterWake()
+
+        #expect(bridge.resumeAfterWakeCount == 1)
+        #expect(power.resumeAfterWakeCount == 0)
+        #expect(bridge.stopCount == 0)
+        #expect(bridge.startCount == 1)
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suite = "CompanionMobileRuntimeTests.\(UUID().uuidString)"
         return UserDefaults(suiteName: suite)!
@@ -187,6 +212,7 @@ struct CompanionMobileRuntimeTests {
 private final class RuntimeServiceSpy: CompanionMobileRuntimeService {
     private(set) var startCount = 0
     private(set) var stopCount = 0
+    private(set) var resumeAfterWakeCount = 0
 
     func start() {
         startCount += 1
@@ -194,5 +220,9 @@ private final class RuntimeServiceSpy: CompanionMobileRuntimeService {
 
     func stop() {
         stopCount += 1
+    }
+
+    func resumeAfterWake() {
+        resumeAfterWakeCount += 1
     }
 }

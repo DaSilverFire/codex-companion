@@ -239,7 +239,7 @@ final class SpriteSheetPreviewView: NSView {
         let actionState = pet.resolvedAnimationState(for: state)
         let actionRow = rowIndex(for: actionState, rows: rows)
         let actionFrameCount = min(columns, frameCount)
-        let actionTiming = state.frameTiming(frameCount: actionFrameCount)
+        let actionTiming = pet.frameTiming(for: state, frameCount: actionFrameCount)
         let actionFrames = makeFrames(
             row: actionRow,
             count: actionFrameCount,
@@ -248,7 +248,7 @@ final class SpriteSheetPreviewView: NSView {
             durationScale: durationScale
         )
         let idleCount = max(1, min(columns, idleFrameCount))
-        let idleTiming = PetAnimationState.idle.frameTiming(frameCount: idleCount)
+        let idleTiming = pet.frameTiming(for: .idle, frameCount: idleCount)
         let idleFrames = makeFrames(
             row: PetAnimationState.idle.rowIndex,
             count: idleCount,
@@ -276,7 +276,10 @@ final class SpriteSheetPreviewView: NSView {
         rows: Int,
         durationScale: Double
     ) -> (frames: [SpriteFrame], loopStartIndex: Int) {
-        let idleTiming = PetAnimationState.idle.frameTiming(frameCount: max(1, min(columns, pet.frameCount(for: .idle))))
+        let idleTiming = pet.frameTiming(
+            for: .idle,
+            frameCount: max(1, min(columns, pet.frameCount(for: .idle)))
+        )
         let idleFrames = makeFrames(
             row: rowIndex(for: .idle, rows: rows),
             count: max(1, min(columns, pet.frameCount(for: .idle))),
@@ -287,7 +290,7 @@ final class SpriteSheetPreviewView: NSView {
 
         if pet.hasNativeRow(for: .goalComplete) {
             let nativeCount = max(1, min(columns, pet.frameCount(for: .goalComplete)))
-            let nativeTiming = PetAnimationState.goalComplete.frameTiming(frameCount: nativeCount)
+            let nativeTiming = pet.frameTiming(for: .goalComplete, frameCount: nativeCount)
             let nativeFrames = makeFrames(
                 row: PetAnimationState.goalComplete.rowIndex,
                 count: nativeCount,

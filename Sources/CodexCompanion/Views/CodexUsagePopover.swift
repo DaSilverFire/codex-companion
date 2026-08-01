@@ -32,6 +32,21 @@ enum CodexUsagePresentationMetrics {
     static let cornerRadius: CGFloat = 20
 }
 
+enum CodexUsageProfileDefaults {
+    static func applicationDefaults(
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier
+    ) -> UserDefaults {
+        guard
+            let bundleIdentifier,
+            !bundleIdentifier.isEmpty,
+            let defaults = UserDefaults(suiteName: bundleIdentifier)
+        else {
+            return .standard
+        }
+        return defaults
+    }
+}
+
 private enum CodexUsageAnimation {
     static let phase = Animation.spring(
         response: 0.34,
@@ -42,24 +57,52 @@ private enum CodexUsageAnimation {
 }
 
 struct CodexUsagePopover: View {
-    @ObservedObject var store: CodexRateLimitStore
+    @ObservedObject private var store: CodexRateLimitStore
+    @StateObject private var profileSwitcher: CodexAccountProfileSwitcher
+    @StateObject private var profileUsageStore: CodexAccountProfileUsageStore
+
+    init(
+        store: CodexRateLimitStore,
+        defaults: UserDefaults = CodexUsageProfileDefaults.applicationDefaults(),
+        selectionChanged: @escaping @MainActor () -> Void = {}
+    ) {
+        self.store = store
+        _profileSwitcher = StateObject(
+            wrappedValue: CodexAccountProfileSwitcher(
+                defaults: defaults,
+                selectionChanged: selectionChanged
+            )
+        )
+        _profileUsageStore = StateObject(wrappedValue: CodexAccountProfileUsageStore())
+    }
 
     var body: some View {
         content
             .companionLiquidGlassMenuSurface(
                 cornerRadius: CodexUsagePresentationMetrics.cornerRadius
             )
-            .onAppear {
-                store.refreshIfNeeded(maxAge: 10)
+            .task(id: profileSwitcher.selectedProfileID) {
+                guard let profile = profileSwitcher.selectedProfile else {
+                    profileUsageStore.select(nil)
+                    store.refreshIfNeeded(maxAge: 10)
+                    return
+                }
+                profileUsageStore.select(profile)
+                await profileUsageStore.refresh(for: profile)
             }
             .onDisappear {
                 store.cancelResetRedemption()
+                profileUsageStore.cancelResetRedemption()
             }
     }
 
     private var content: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+
+            if !profileSwitcher.profiles.isEmpty {
+                accountSelector
+            }
 
             phaseContent
                 .id(phase)
@@ -69,7 +112,7 @@ struct CodexUsagePopover: View {
                     )
                 )
 
-            if let statusMessage = store.resetStatusMessage {
+            if let statusMessage = activeResetStatusMessage {
                 statusRow(statusMessage)
                     .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
@@ -80,7 +123,37 @@ struct CodexUsagePopover: View {
             alignment: .leading
         )
         .animation(CodexUsageAnimation.phase, value: phase)
-        .animation(CodexUsageAnimation.phase, value: store.resetStatusMessage)
+        .animation(CodexUsageAnimation.phase, value: activeResetStatusMessage)
+    }
+
+    private var accountSelector: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Picker("New work account", selection: selectedProfileBinding) {
+                Text("Current app account")
+                    .tag(UUID?.none)
+                ForEach(profileSwitcher.profiles) { profile in
+                    Text(profile.label)
+                        .tag(Optional(profile.id))
+                }
+            }
+            .pickerStyle(.menu)
+            .controlSize(.small)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text("New Codex work uses this account. Running work stays with its original account.")
+                .font(.system(size: 8, weight: .medium))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var selectedProfileBinding: Binding<UUID?> {
+        Binding(
+            get: { profileSwitcher.selectedProfileID },
+            set: { profileID in
+                profileSwitcher.selectProfile(id: profileID)
+            }
+        )
     }
 
     private var header: some View {
@@ -109,17 +182,17 @@ struct CodexUsagePopover: View {
     private var refreshButton: some View {
         Button {
             withAnimation(CodexUsageAnimation.refresh) {
-                store.refresh()
+                refreshUsage()
             }
         } label: {
             ZStack {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 11, weight: .bold))
-                    .opacity(store.isLoading ? 0 : 1)
+                    .opacity(activeIsLoading ? 0 : 1)
 
                 ProgressView()
                     .controlSize(.mini)
-                    .opacity(store.isLoading ? 1 : 0)
+                    .opacity(activeIsLoading ? 1 : 0)
             }
             .frame(
                 width: CodexUsagePresentationMetrics.iconButtonSize,
@@ -133,9 +206,19 @@ struct CodexUsagePopover: View {
             width: CodexUsagePresentationMetrics.iconButtonSize,
             height: CodexUsagePresentationMetrics.iconButtonSize
         )
-        .disabled(store.isLoading)
-        .accessibilityLabel(store.isLoading ? "Refreshing Codex usage" : "Refresh Codex usage")
+        .disabled(activeIsLoading)
+        .accessibilityLabel(activeIsLoading ? "Refreshing Codex usage" : "Refresh Codex usage")
         .help("Refresh Codex usage")
+    }
+
+    private func refreshUsage() {
+        if let profile = profileSwitcher.selectedProfile {
+            Task {
+                await profileUsageStore.refresh(for: profile)
+            }
+        } else {
+            store.refresh()
+        }
     }
 
     @ViewBuilder
@@ -144,11 +227,11 @@ struct CodexUsagePopover: View {
         case .loading:
             loadingContent
         case .usage:
-            if let snapshot = store.snapshot {
+            if let snapshot = activeSnapshot {
                 usageContent(snapshot)
             }
         case .confirmation:
-            if let confirmation = store.pendingResetConfirmation {
+            if let confirmation = activePendingResetConfirmation {
                 resetConfirmation(confirmation)
             }
         case .unavailable:
@@ -208,7 +291,7 @@ struct CodexUsagePopover: View {
                 .foregroundStyle(.orange)
                 .frame(width: 18)
 
-            Text(store.errorMessage ?? "Codex usage is unavailable.")
+            Text(activeErrorMessage ?? "Codex usage is unavailable.")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -218,17 +301,17 @@ struct CodexUsagePopover: View {
 
     private var phase: CodexUsagePresentationPhase {
         CodexUsagePresentationPolicy.phase(
-            isLoading: store.isLoading,
-            hasSnapshot: store.snapshot != nil,
-            hasConfirmation: store.pendingResetConfirmation != nil
+            isLoading: activeIsLoading,
+            hasSnapshot: activeSnapshot != nil,
+            hasConfirmation: activePendingResetConfirmation != nil
         )
     }
 
     private var headerDetail: String {
-        if let lastUpdated = store.lastUpdated {
+        if let lastUpdated = activeLastUpdated {
             return "Updated \(lastUpdated.formatted(date: .omitted, time: .shortened))"
         }
-        return store.menuSummary
+        return activeMenuSummary
     }
 
     @ViewBuilder
@@ -248,13 +331,13 @@ struct CodexUsagePopover: View {
                 Text("No Codex usage resets are available.")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(.secondary)
-            } else if store.availableResetCredits.isEmpty {
+            } else if activeAvailableResetCredits.isEmpty {
                 Text("Available resets were reported without selectable details.")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                ForEach(store.availableResetCredits) { credit in
+                ForEach(activeAvailableResetCredits) { credit in
                     resetChoice(credit)
                 }
             }
@@ -264,7 +347,7 @@ struct CodexUsagePopover: View {
     private func resetChoice(_ credit: CodexRateLimitResetCredit) -> some View {
         Button {
             withAnimation(CodexUsageAnimation.phase) {
-                store.prepareResetRedemption(for: credit)
+                prepareResetRedemption(for: credit)
             }
         } label: {
             HStack(spacing: 8) {
@@ -318,16 +401,16 @@ struct CodexUsagePopover: View {
             HStack(spacing: 8) {
                 confirmationButton(title: "Cancel", isProminent: false) {
                     withAnimation(CodexUsageAnimation.phase) {
-                        store.cancelResetRedemption()
+                        cancelResetRedemption()
                     }
                 }
 
                 confirmationButton(title: "Apply Reset", isProminent: true) {
                     withAnimation(CodexUsageAnimation.phase) {
-                        store.confirmResetRedemption(confirmation)
+                        confirmResetRedemption(confirmation)
                     }
                 }
-                .disabled(store.isRedeemingReset)
+                .disabled(activeIsRedeemingReset)
             }
         }
         .frame(maxWidth: .infinity, minHeight: 104, alignment: .topLeading)
@@ -357,7 +440,7 @@ struct CodexUsagePopover: View {
 
     private func statusRow(_ message: String) -> some View {
         HStack(alignment: .top, spacing: 7) {
-            Image(systemName: store.isRedeemingReset ? "hourglass" : "checkmark.circle")
+            Image(systemName: activeIsRedeemingReset ? "hourglass" : "checkmark.circle")
                 .font(.system(size: 9, weight: .semibold))
                 .frame(width: 14)
             Text(message)
@@ -365,6 +448,78 @@ struct CodexUsagePopover: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private func prepareResetRedemption(for credit: CodexRateLimitResetCredit) {
+        if profileSwitcher.selectedProfile != nil {
+            profileUsageStore.prepareResetRedemption(for: credit)
+        } else {
+            store.prepareResetRedemption(for: credit)
+        }
+    }
+
+    private func cancelResetRedemption() {
+        if profileSwitcher.selectedProfile != nil {
+            profileUsageStore.cancelResetRedemption()
+        } else {
+            store.cancelResetRedemption()
+        }
+    }
+
+    private func confirmResetRedemption(_ confirmation: CodexResetConfirmation) {
+        guard let profile = profileSwitcher.selectedProfile else {
+            store.confirmResetRedemption(confirmation)
+            return
+        }
+        Task {
+            await profileUsageStore.confirmResetRedemption(confirmation, for: profile)
+            guard profileSwitcher.selectedProfileID == profile.id else { return }
+            await profileUsageStore.refresh(for: profile)
+        }
+    }
+
+    private var activeSnapshot: CodexUsageSnapshot? {
+        profileSwitcher.selectedProfile == nil ? store.snapshot : profileUsageStore.snapshot
+    }
+
+    private var activeIsLoading: Bool {
+        profileSwitcher.selectedProfile == nil ? store.isLoading : profileUsageStore.isLoading
+    }
+
+    private var activeLastUpdated: Date? {
+        profileSwitcher.selectedProfile == nil ? store.lastUpdated : profileUsageStore.lastUpdated
+    }
+
+    private var activeErrorMessage: String? {
+        profileSwitcher.selectedProfile == nil ? store.errorMessage : profileUsageStore.errorMessage
+    }
+
+    private var activePendingResetConfirmation: CodexResetConfirmation? {
+        profileSwitcher.selectedProfile == nil
+            ? store.pendingResetConfirmation
+            : profileUsageStore.pendingResetConfirmation
+    }
+
+    private var activeIsRedeemingReset: Bool {
+        profileSwitcher.selectedProfile == nil
+            ? store.isRedeemingReset
+            : profileUsageStore.isRedeemingReset
+    }
+
+    private var activeResetStatusMessage: String? {
+        profileSwitcher.selectedProfile == nil
+            ? store.resetStatusMessage
+            : profileUsageStore.resetStatusMessage
+    }
+
+    private var activeAvailableResetCredits: [CodexRateLimitResetCredit] {
+        profileSwitcher.selectedProfile == nil
+            ? store.availableResetCredits
+            : profileUsageStore.availableResetCredits
+    }
+
+    private var activeMenuSummary: String {
+        profileSwitcher.selectedProfile == nil ? store.menuSummary : profileUsageStore.menuSummary
     }
 }
 

@@ -26,11 +26,13 @@ struct ContentView: View {
         .animation(.smooth(duration: 0.20, extraBounce: 0.08), value: model.isQuickBarOpen)
         .onChange(of: model.isQuickBarOpen) { _, isOpen in
             if !isOpen {
+                CodexUsagePanel.shared.dismiss()
                 isUsagePresented = false
                 isChatModelPickerPresented = false
             }
         }
         .onChange(of: model.isCodexProcessTrayVisible) { _, _ in
+            CodexUsagePanel.shared.dismiss()
             isUsagePresented = false
             isChatModelPickerPresented = false
         }
@@ -77,32 +79,15 @@ struct ContentView: View {
         .frame(width: PetWindowMetrics.petSize.width, height: PetWindowMetrics.petSize.height)
         .contentShape(Rectangle())
         .contextMenu {
-            Button("Open Codex") {
-                model.showCodexProcesses()
-            }
-
-            if !model.isCodexOnlyMode {
-                Button("ChatGPT Menu") {
-                    model.sendPrompt(mode: .chatGPT)
-                }
-            }
-
-            Button(model.isQuickBarOpen ? "Hide Quick Bar" : "Show Quick Bar") {
-                model.toggleQuickBar()
-            }
-
-            Button("Hide Pet") {
+            Button {
                 model.hidePet()
+            } label: {
+                Label("Hide Pet", systemImage: "eye.slash")
             }
 
-            Divider()
-
-            ForEach(PetAnimationState.allCases) { state in
-                Button(state.title) {
-                    model.setAnimation(state)
-                }
+            SettingsLink {
+                Label("Open Settings", systemImage: "gearshape")
             }
-
         }
     }
 
@@ -172,12 +157,18 @@ struct ContentView: View {
 
     private var codexUsageButton: some View {
         Button {
-            withAnimation(menuToggleAnimation) {
-                isUsagePresented.toggle()
-            }
-            if isUsagePresented {
-                model.rateLimitStore.refreshIfNeeded(maxAge: 10)
-            }
+            isChatModelPickerPresented = false
+            CodexUsagePanel.shared.toggle(
+                store: model.rateLimitStore,
+                selectionChanged: {
+                    model.processStore.refresh()
+                },
+                presentationChanged: { isPresented in
+                    withAnimation(menuToggleAnimation) {
+                        isUsagePresented = isPresented
+                    }
+                }
+            )
         } label: {
             Image(systemName: model.rateLimitStore.isLoading ? "hourglass" : "info.circle")
                 .font(.system(size: 13, weight: .semibold))
@@ -200,13 +191,12 @@ struct ContentView: View {
         .contentShape(Circle())
         .accessibilityLabel("Codex usage and resets")
         .help("Codex usage and resets")
-        .popover(isPresented: $isUsagePresented, arrowEdge: .bottom) {
-            CodexUsagePopover(store: model.rateLimitStore)
-        }
     }
 
     private var chatModelButton: some View {
         Button {
+            CodexUsagePanel.shared.dismiss()
+            isUsagePresented = false
             withAnimation(menuToggleAnimation) {
                 isChatModelPickerPresented.toggle()
             }
@@ -241,6 +231,7 @@ struct ContentView: View {
 
     private var modeButton: some View {
         Button {
+            CodexUsagePanel.shared.dismiss()
             isUsagePresented = false
             isChatModelPickerPresented = false
             if model.isCodexProcessTrayVisible {
@@ -326,6 +317,7 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .contentShape(Circle())
+        .accessibilityLabel(menuButtonHelp)
         .help(menuButtonHelp)
         .animation(menuToggleAnimation, value: model.isQuickBarOpen)
         .animation(menuToggleAnimation, value: shouldShowActiveProcessBadge)

@@ -185,12 +185,12 @@ struct CompanionPresentationTests {
     }
 
     @Test
-    func openTrayKeepsPointerReconciliationAliveWithoutDirectionalLook() {
+    func visiblePetKeepsPointerReconciliationAliveWithoutDirectionalLook() {
         #expect(CompanionPresentationPolicy.requiresPointerHoverReconciliation(
             isQuickBarOpen: true,
             isPetVisible: true
         ))
-        #expect(!CompanionPresentationPolicy.requiresPointerHoverReconciliation(
+        #expect(CompanionPresentationPolicy.requiresPointerHoverReconciliation(
             isQuickBarOpen: false,
             isPetVisible: true
         ))

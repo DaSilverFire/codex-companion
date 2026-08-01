@@ -152,6 +152,17 @@ actor CompanionRelayConnection {
         publish(.stopped)
     }
 
+    func resumeAfterWake() {
+        guard shouldRun else { return }
+        failPendingPacketResults(
+            CompanionRelayConnectionError.transportFailed(
+                "The encrypted relay is reconnecting after the Mac woke."
+            )
+        )
+        reconnectAttempt = 0
+        connect()
+    }
+
     func send(_ envelope: CompanionBridgeEncryptedEnvelope) async throws {
         guard relayRegistrationAcknowledged else {
             throw CompanionRelayConnectionError.notRegistered

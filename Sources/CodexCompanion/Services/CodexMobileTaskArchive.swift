@@ -10,11 +10,21 @@ struct CodexMobileMessagePage: Equatable, Sendable {
     var nextCursor: String?
 }
 
+struct CodexMobileTaskAccountHandoffContext: Equatable, Sendable {
+    var rolloutURL: URL
+    var hasActiveTurn: Bool
+}
+
 struct CodexMobileTimelinePage: Equatable, Sendable {
     var items: [CompanionBridgeTimelineItem]
     var nextCursor: String?
     var revision: String
     var contextUsage: CompanionBridgeContextUsage?
+}
+
+struct CodexMobileSubagentFamily: Equatable, Sendable {
+    var mainThreadID: String
+    var subagents: [CompanionBridgeSubagent]
 }
 
 struct CodexMobileTaskArchive: Sendable {
@@ -23,6 +33,46 @@ struct CodexMobileTaskArchive: Sendable {
     private static let maximumInlineMediaSize = 1024 * 1024
     private static let maximumToolDetailSize = 2_000
     private static let suppressedToolWrapperTitle = "__companion_suppressed_tool_wrapper__"
+
+    private static func firstNewlineIndex(
+        in data: Data,
+        from startIndex: Data.Index? = nil
+    ) -> Data.Index? {
+        let searchStart = startIndex ?? data.startIndex
+        let startOffset = data.distance(from: data.startIndex, to: searchStart)
+        return data.withUnsafeBytes { bytes in
+            guard let baseAddress = bytes.baseAddress,
+                  startOffset < bytes.count,
+                  let match = memchr(
+                      baseAddress.advanced(by: startOffset),
+                      0x0A,
+                      bytes.count - startOffset
+                  ) else { return nil }
+            let offset = baseAddress.distance(to: UnsafeRawPointer(match))
+            return data.index(data.startIndex, offsetBy: offset)
+        }
+    }
+
+    private static func lastNewlineIndex(in data: Data) -> Data.Index? {
+        data.withUnsafeBytes { bytes in
+            guard let baseAddress = bytes.baseAddress else { return nil }
+            var searchOffset = 0
+            var lastMatchOffset: Int?
+            while searchOffset < bytes.count,
+                  let match = memchr(
+                      baseAddress.advanced(by: searchOffset),
+                      0x0A,
+                      bytes.count - searchOffset
+                  ) {
+                let matchOffset = baseAddress.distance(to: UnsafeRawPointer(match))
+                lastMatchOffset = matchOffset
+                searchOffset = matchOffset + 1
+            }
+            return lastMatchOffset.map {
+                data.index(data.startIndex, offsetBy: $0)
+            }
+        }
+    }
 
     private struct RawTimelineRecord {
         var offset: UInt64
@@ -214,6 +264,24 @@ struct CodexMobileTaskArchive: Sendable {
         return try reverseMessagePage(url: url, cursor: cursor, limit: limit)
     }
 
+    func accountHandoffContext(
+        threadID: String
+    ) throws -> CodexMobileTaskAccountHandoffContext {
+        let trimmedThreadID = threadID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedThreadID.isEmpty else { throw CodexMobileArchiveError.invalidThreadID }
+        guard let rolloutPath = try rolloutPath(for: trimmedThreadID) else {
+            throw CodexMobileArchiveError.threadNotFound
+        }
+        let url = rolloutURL(from: rolloutPath)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw CodexMobileArchiveError.historyMissing
+        }
+        return CodexMobileTaskAccountHandoffContext(
+            rolloutURL: url.standardizedFileURL,
+            hasActiveTurn: latestTaskRolloutState(in: url).lifecycle?.isActive == true
+        )
+    }
+
     func timeline(
         threadID: String,
         cursor: String?,
@@ -234,8 +302,12 @@ struct CodexMobileTaskArchive: Sendable {
     }
 
     func subagents(parentThreadID: String, limit requestedLimit: Int?) throws -> [CompanionBridgeSubagent] {
-        let parentThreadID = parentThreadID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !parentThreadID.isEmpty else { throw CodexMobileArchiveError.invalidThreadID }
+        try subagentFamily(threadID: parentThreadID, limit: requestedLimit).subagents
+    }
+
+    func subagentFamily(threadID: String, limit requestedLimit: Int?) throws -> CodexMobileSubagentFamily {
+        let threadID = threadID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !threadID.isEmpty else { throw CodexMobileArchiveError.invalidThreadID }
         let limit = boundedLimit(requestedLimit, fallback: 8)
         let pendingApprovalThreadIDs = readPendingApprovalThreadIDs()
         let rows = try sqliteRows(query: """
@@ -246,13 +318,13 @@ struct CodexMobileTaskArchive: Sendable {
           and source like '{"subagent":%';
         """)
 
-        return rows.compactMap { columns -> (CompanionBridgeSubagent, Double)? in
+        let parsed = rows.compactMap { columns -> (CompanionBridgeSubagent, String, Double)? in
             guard columns.count >= 5,
                   let sourceData = columns[2].data(using: .utf8),
                   let source = try? JSONSerialization.jsonObject(with: sourceData) as? [String: Any],
                   let subagent = source["subagent"] as? [String: Any],
                   let spawn = subagent["thread_spawn"] as? [String: Any],
-                  spawn["parent_thread_id"] as? String == parentThreadID
+                  let parentThreadID = nonempty(spawn["parent_thread_id"] as? String ?? "")
             else { return nil }
             let updatedAt = date(fromMilliseconds: columns[3]) ?? .distantPast
             let needsApproval = pendingApprovalThreadIDs.contains(columns[0])
@@ -269,11 +341,36 @@ struct CodexMobileTaskArchive: Sendable {
                 status: status,
                 needsApproval: needsApproval
             )
-            return (agent, Double(columns[4]) ?? updatedAt.timeIntervalSince1970 * 1_000)
+            return (
+                agent,
+                parentThreadID,
+                Double(columns[4]) ?? updatedAt.timeIntervalSince1970 * 1_000
+            )
         }
-        .sorted { $0.1 > $1.1 }
-        .prefix(limit)
-        .map(\.0)
+
+        let parentBySubagentID = Dictionary(
+            uniqueKeysWithValues: parsed.map { ($0.0.id, $0.1) }
+        )
+        func mainThreadID(for candidateThreadID: String) -> String {
+            var candidateThreadID = candidateThreadID
+            var visited = Set([candidateThreadID])
+            while let parentThreadID = parentBySubagentID[candidateThreadID],
+                  visited.insert(parentThreadID).inserted {
+                candidateThreadID = parentThreadID
+            }
+            return candidateThreadID
+        }
+
+        let resolvedMainThreadID = mainThreadID(for: threadID)
+        let family = parsed
+            .filter { mainThreadID(for: $0.0.id) == resolvedMainThreadID }
+            .sorted { $0.2 > $1.2 }
+            .prefix(limit)
+            .map(\.0)
+        return CodexMobileSubagentFamily(
+            mainThreadID: resolvedMainThreadID,
+            subagents: family
+        )
     }
 
     private func reverseMessagePage(
@@ -297,7 +394,7 @@ struct CodexMobileTaskArchive: Sendable {
             var block = handle.readData(ofLength: Int(endOffset - startOffset))
 
             if isSkippingOversizedLine {
-                if let newline = block.lastIndex(of: 0x0A) {
+                if let newline = Self.lastNewlineIndex(in: block) {
                     endOffset = startOffset + UInt64(block.distance(from: block.startIndex, to: newline))
                     isSkippingOversizedLine = false
                 } else {
@@ -312,7 +409,7 @@ struct CodexMobileTaskArchive: Sendable {
             if startOffset == 0 {
                 firstCompleteIndex = block.startIndex
                 carry.removeAll(keepingCapacity: false)
-            } else if let newline = block.firstIndex(of: 0x0A) {
+            } else if let newline = Self.firstNewlineIndex(in: block) {
                 carry = block.subdata(in: block.startIndex..<newline)
                 firstCompleteIndex = block.index(after: newline)
             } else {
@@ -330,7 +427,7 @@ struct CodexMobileTaskArchive: Sendable {
             var records: [(UInt64, Data)] = []
             var lineStart = complete.startIndex
             while lineStart < complete.endIndex {
-                let lineEnd = complete[lineStart...].firstIndex(of: 0x0A) ?? complete.endIndex
+                let lineEnd = Self.firstNewlineIndex(in: complete, from: lineStart) ?? complete.endIndex
                 if lineEnd > lineStart {
                     let localOffset = complete.distance(from: complete.startIndex, to: lineStart)
                     let absolute = startOffset
@@ -382,7 +479,7 @@ struct CodexMobileTaskArchive: Sendable {
             var block = handle.readData(ofLength: Int(endOffset - startOffset))
 
             if isSkippingOversizedLine {
-                if let newline = block.lastIndex(of: 0x0A) {
+                if let newline = Self.lastNewlineIndex(in: block) {
                     endOffset = startOffset + UInt64(block.distance(from: block.startIndex, to: newline))
                     isSkippingOversizedLine = false
                 } else {
@@ -396,7 +493,7 @@ struct CodexMobileTaskArchive: Sendable {
             if startOffset == 0 {
                 firstCompleteIndex = block.startIndex
                 carry.removeAll(keepingCapacity: false)
-            } else if let newline = block.firstIndex(of: 0x0A) {
+            } else if let newline = Self.firstNewlineIndex(in: block) {
                 carry = block.subdata(in: block.startIndex..<newline)
                 firstCompleteIndex = block.index(after: newline)
             } else {
@@ -414,7 +511,7 @@ struct CodexMobileTaskArchive: Sendable {
             var records: [(UInt64, Data)] = []
             var lineStart = complete.startIndex
             while lineStart < complete.endIndex {
-                let lineEnd = complete[lineStart...].firstIndex(of: 0x0A) ?? complete.endIndex
+                let lineEnd = Self.firstNewlineIndex(in: complete, from: lineStart) ?? complete.endIndex
                 if lineEnd > lineStart {
                     let localOffset = complete.distance(from: complete.startIndex, to: lineStart)
                     let absolute = startOffset
@@ -1205,15 +1302,18 @@ struct CodexMobileTaskArchive: Sendable {
 
         let columnSeparator = "\u{1f}"
         let rowSeparator = "\u{1e}"
-        let result = try CodexSQLiteProcessRunner.run(
-            executableURL: sqliteExecutableURL,
-            arguments: [
-            "-separator", columnSeparator,
-            "-newline", rowSeparator,
-            database.path,
-            query,
-            ]
+        let arguments = CodexSQLiteProcessRunner.readArguments(
+            databaseURL: database,
+            query: query,
+            columnSeparator: columnSeparator,
+            rowSeparator: rowSeparator
         )
+        let result = try CodexSQLiteProcessRunner.retryingTransientRead {
+            try CodexSQLiteProcessRunner.run(
+                executableURL: sqliteExecutableURL,
+                arguments: arguments
+            )
+        }
         guard result.terminationStatus == 0 else {
             let detail = String(decoding: result.standardError, as: UTF8.self)
             throw CodexMobileArchiveError.sqliteFailed(detail)
@@ -1332,6 +1432,25 @@ struct CodexSQLiteProcessResult: Sendable {
 }
 
 enum CodexSQLiteProcessRunner {
+    static let readBusyTimeoutMilliseconds = 3_000
+    static let transientReadRetryDelays: [TimeInterval] = [0.15, 0.45]
+
+    static func readArguments(
+        databaseURL: URL,
+        query: String,
+        columnSeparator: String,
+        rowSeparator: String
+    ) -> [String] {
+        [
+            "-readonly",
+            "-cmd", ".timeout \(readBusyTimeoutMilliseconds)",
+            "-separator", columnSeparator,
+            "-newline", rowSeparator,
+            databaseURL.path,
+            query,
+        ]
+    }
+
     static func run(executableURL: URL, arguments: [String]) throws -> CodexSQLiteProcessResult {
         let fileManager = FileManager.default
         let captureDirectory = fileManager.temporaryDirectory
@@ -1369,5 +1488,29 @@ enum CodexSQLiteProcessRunner {
             standardOutput: try Data(contentsOf: outputURL),
             standardError: try Data(contentsOf: errorURL)
         )
+    }
+
+    static func retryingTransientRead(
+        retryDelays: [TimeInterval] = transientReadRetryDelays,
+        sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+        operation: () throws -> CodexSQLiteProcessResult
+    ) rethrows -> CodexSQLiteProcessResult {
+        var result = try operation()
+        for delay in retryDelays {
+            guard isTransientReadLock(result) else { return result }
+            sleep(delay)
+            result = try operation()
+        }
+        return result
+    }
+
+    private static func isTransientReadLock(_ result: CodexSQLiteProcessResult) -> Bool {
+        guard result.terminationStatus != 0 else { return false }
+        let detail = String(decoding: result.standardError, as: UTF8.self).lowercased()
+        return detail.contains("database is locked")
+            || detail.contains("database table is locked")
+            || detail.contains("database schema is locked")
+            || detail.contains("database is busy")
+            || detail.contains("sqlite_busy")
     }
 }
