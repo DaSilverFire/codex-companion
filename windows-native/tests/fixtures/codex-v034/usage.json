@@ -1,0 +1,71 @@
+{
+  "rateLimits": {
+    "limitId": "codex",
+    "limitName": null,
+    "primary": {
+      "usedPercent": 18,
+      "windowDurationMins": 300,
+      "resetsAt": 978307500
+    },
+    "secondary": {
+      "usedPercent": 39,
+      "windowDurationMins": 10080,
+      "resetsAt": 978307600
+    },
+    "planType": "pro",
+    "rateLimitReachedType": null
+  },
+  "rateLimitsByLimitId": {
+    "codex": {
+      "limitId": "codex",
+      "limitName": null,
+      "primary": {
+        "usedPercent": 18,
+        "windowDurationMins": 300,
+        "resetsAt": 978307500
+      },
+      "secondary": {
+        "usedPercent": 39,
+        "windowDurationMins": 10080,
+        "resetsAt": 978307600
+      },
+      "planType": "pro",
+      "rateLimitReachedType": null
+    },
+    "extra": {
+      "limitId": "extra",
+      "limitName": "Extra",
+      "primary": {
+        "usedPercent": 50,
+        "windowDurationMins": 60,
+        "resetsAt": null
+      },
+      "secondary": null,
+      "planType": "pro",
+      "rateLimitReachedType": null
+    }
+  },
+  "rateLimitResetCredits": {
+    "availableCount": 2,
+    "credits": [
+      {
+        "id": "credit-a",
+        "resetType": "codexRateLimits",
+        "status": "available",
+        "grantedAt": 100,
+        "expiresAt": 978307700,
+        "title": "Referral reset",
+        "description": "Resets Codex usage"
+      },
+      {
+        "id": "credit-b",
+        "resetType": "codexRateLimits",
+        "status": "redeemed",
+        "grantedAt": 50,
+        "expiresAt": null,
+        "title": null,
+        "description": null
+      }
+    ]
+  }
+}

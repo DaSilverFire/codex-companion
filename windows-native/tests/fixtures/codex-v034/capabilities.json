@@ -1,0 +1,74 @@
+{
+  "chatModels": [
+    {
+      "id": "on-device",
+      "provider": "onDevice",
+      "model": "on-device",
+      "displayName": "On-device",
+      "description": "Foundry Local model on this Windows PC",
+      "isDefault": true,
+      "isAvailable": true,
+      "supportsAttachments": false
+    },
+    {
+      "id": "openai:gpt56Luna",
+      "provider": "openAIAPI",
+      "model": "gpt56Luna",
+      "displayName": "5.6 Luna",
+      "description": "lowest cost",
+      "isDefault": false,
+      "isAvailable": true,
+      "supportsAttachments": false
+    },
+    {
+      "id": "openai:gpt56Terra",
+      "provider": "openAIAPI",
+      "model": "gpt56Terra",
+      "displayName": "5.6 Terra",
+      "description": "balanced",
+      "isDefault": false,
+      "isAvailable": true,
+      "supportsAttachments": false
+    },
+    {
+      "id": "openai:gpt56Sol",
+      "provider": "openAIAPI",
+      "model": "gpt56Sol",
+      "displayName": "5.6 Sol",
+      "description": "highest capability",
+      "isDefault": false,
+      "isAvailable": true,
+      "supportsAttachments": false
+    },
+    {
+      "id": "lumo:automatic",
+      "provider": "lumoAPI",
+      "model": "automatic",
+      "displayName": "Lumo Auto",
+      "description": "best available model",
+      "isDefault": false,
+      "isAvailable": true,
+      "supportsAttachments": false
+    },
+    {
+      "id": "lumo:fast",
+      "provider": "lumoAPI",
+      "model": "fast",
+      "displayName": "Lumo Fast",
+      "description": "fast responses",
+      "isDefault": false,
+      "isAvailable": true,
+      "supportsAttachments": false
+    },
+    {
+      "id": "lumo:thinking",
+      "provider": "lumoAPI",
+      "model": "thinking",
+      "displayName": "Lumo Thinking",
+      "description": "deeper reasoning",
+      "isDefault": false,
+      "isAvailable": true,
+      "supportsAttachments": false
+    }
+  ]
+}

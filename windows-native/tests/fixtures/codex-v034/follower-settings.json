@@ -1,0 +1,15 @@
+{
+  "type": "request",
+  "requestId": "settings-id",
+  "sourceClientId": "client-id",
+  "version": 1,
+  "method": "thread-follower-update-thread-settings",
+  "params": {
+    "conversationId": "thread-id",
+    "threadSettings": {
+      "model": "gpt-5.6",
+      "effort": "high"
+    }
+  },
+  "timeoutMs": 30000
+}

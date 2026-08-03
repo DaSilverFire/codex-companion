@@ -1,0 +1,7 @@
+{
+  "sourceCommit": "35b9ded3a96e9b4fd2787cbd7ef1e8859264ff1b",
+  "tag": "v0.3.4",
+  "packetID": "packet_42-alpha",
+  "envelopeJSON": "{\"channelID\":\"eSyhONfJ1y6Jx2xFO1drQDpNAcFv_zWi\",\"sealedPayload\":\"AAECAwQFBgcICQoL8tlhblpjxC7DoQXDtD9jBroD04A0VpebkKcB9lv0hEFL4Trmka30S6IwP9ekZYEK\",\"senderID\":\"iphone-fixture\",\"sentAtMilliseconds\":1700000000123,\"sequence\":42,\"version\":1}",
+  "envelopeBase64": "eyJjaGFubmVsSUQiOiJlU3loT05mSjF5Nkp4MnhGTzFkclFEcE5BY0Z2X3pXaSIsInNlYWxlZFBheWxvYWQiOiJBQUVDQXdRRkJnY0lDUW9MOHRsaGJscGp4QzdEb1FYRHREOWpCcm9EMDRBMFZwZWJrS2NCOWx2MGhFRkw0VHJta2EzMFM2SXdQOWVrWllFSyIsInNlbmRlcklEIjoiaXBob25lLWZpeHR1cmUiLCJzZW50QXRNaWxsaXNlY29uZHMiOjE3MDAwMDAwMDAxMjMsInNlcXVlbmNlIjo0MiwidmVyc2lvbiI6MX0="
+}

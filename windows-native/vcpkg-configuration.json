@@ -1,0 +1,8 @@
+{
+  "$comment": "Pinned vcpkg source baseline: a9f0cd0345fb29cd227d802f1fd1917c28f8e5a3",
+  "default-registry": {
+    "kind": "filesystem",
+    "path": ".deps/vcpkg/a9f0cd0345fb29cd227d802f1fd1917c28f8e5a3/registry",
+    "baseline": "a9f0cd0345fb29cd227d802f1fd1917c28f8e5a3"
+  }
+}

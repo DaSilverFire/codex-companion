@@ -22,13 +22,22 @@ The installer validates the app, replaces `/Applications/Codex Companion.app` wi
 
 Pre-notarized releases ask for confirmation during installation. macOS may also require approval in **System Settings > Privacy & Security**.
 
+## Install on Windows
+
+Normal users do not need Visual Studio or Qt.
+
+1. Download the Windows installer from GitHub Releases.
+2. Open `Codex-Companion-Setup-0.3.5.exe`.
+3. Complete the installer and launch Codex Companion from the Start menu.
+
+The Windows installer includes the Companion runtime and the generic `companion-pet` skill. It intentionally contains no personal pet artwork. Existing pets in the user's Codex or Companion pet folders are discovered automatically.
+
 ## Build from source
 
 Requirements:
 
-- macOS 14 or newer
-- Xcode with the macOS SDK
-- Swift 5.10 or newer
+- macOS: macOS 14 or newer, Xcode with the macOS SDK, and Swift 5.10 or newer.
+- Windows: Windows 11, Visual Studio 2022 with the Windows SDK, Qt 6.11, CMake, and Ninja.
 
 Run and verify a local development build:
 
@@ -40,6 +49,14 @@ Create a universal release artifact using the version in `VERSION`:
 
 ```bash
 CODEX_COMPANION_BUILD_NUMBER=1 ./script/create_release.sh
+```
+
+Configure the native Windows build using the checked-in preset:
+
+```powershell
+cmake --preset windows-msvc-debug
+cmake --build --preset windows-msvc-debug
+ctest --preset windows-msvc-debug
 ```
 
 See [RELEASING.md](RELEASING.md) for signing, notarization, update-feed, and public-export requirements.

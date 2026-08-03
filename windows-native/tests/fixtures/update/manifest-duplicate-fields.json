@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "version": "0.3.4",
+  "build": 34,
+  "build": 35,
+  "minimumSystemVersion": "10.0.22000",
+  "publishedAt": "2026-07-19T12:34:56Z",
+  "downloadURL": "https://updates.example.test/update.exe",
+  "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+  "size": 42000,
+  "signature": "signature"
+}

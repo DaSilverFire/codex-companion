@@ -1,0 +1,37 @@
+{
+  "type": "request",
+  "requestId": "reply-id",
+  "sourceClientId": "client-id",
+  "version": 1,
+  "method": "thread-follower-start-turn",
+  "params": {
+    "conversationId": "thread-id",
+    "turnStartParams": {
+      "input": [
+        {
+          "type": "text",
+          "text": "Use these references",
+          "text_elements": []
+        },
+        {
+          "type": "localImage",
+          "path": "C:/staged/reference.png"
+        }
+      ],
+      "clientUserMessageId": "message-id",
+      "attachments": [
+        {
+          "label": "notes.txt",
+          "path": "C:/staged/notes.txt",
+          "fsPath": "C:/staged/notes.txt"
+        },
+        {
+          "label": "reference.png",
+          "path": "C:/staged/reference.png",
+          "fsPath": "C:/staged/reference.png"
+        }
+      ]
+    }
+  },
+  "timeoutMs": 30000
+}

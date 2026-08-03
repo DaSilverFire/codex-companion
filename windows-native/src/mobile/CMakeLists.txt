@@ -1,0 +1,59 @@
+add_library(companion_mobile STATIC
+  MobileTypes.h
+  MobileTypes.cpp
+  MobileRequestDispatcher.h
+  MobileRequestDispatcher.cpp
+  presence/MobilePresencePetCatalogService.h
+  presence/MobilePresencePetCatalogService.cpp
+  attachments/MobileIncomingAttachmentStore.h
+  attachments/MobileIncomingAttachmentStore.cpp
+  history/MobileHistoryCoordinator.h
+  history/MobileHistoryCoordinator.cpp
+  nearby/NearbyTransport.h
+  nearby/NearbyFrameCodec.h
+  nearby/NearbyFrameCodec.cpp
+  nearby/NearbyTransferAssembler.h
+  nearby/NearbyTransferAssembler.cpp
+  nearby/NearbyWebSocketServer.h
+  nearby/NearbyWebSocketServer.cpp
+  relay/RelayModels.h
+  relay/RelayModels.cpp
+  relay/RelayWireCodec.h
+  relay/RelayWireCodec.cpp
+  relay/RelaySettings.h
+  relay/RelaySettings.cpp
+  relay/RelayAudit.h
+  relay/RelayAudit.cpp
+  relay/RelayConnection.h
+  relay/RelayConnection.cpp
+  relay/RelayPairingBootstrap.h
+  relay/RelayPairingBootstrap.cpp
+  relay/RelayEndpointManager.h
+  relay/RelayEndpointManager.cpp
+  security/SecurityModels.h
+  security/SecretProtector.h
+  security/BridgeSecurity.h
+  security/BridgeSecurity.cpp
+  security/PairingRecordStore.h
+  security/PairingRecordStore.cpp
+  security/PairingCoordinator.h
+  security/PairingCoordinator.cpp
+  security/RelayStateStore.h
+  security/RelayStateStore.cpp
+)
+
+target_include_directories(companion_mobile PUBLIC
+  "${PROJECT_SOURCE_DIR}/src"
+)
+target_link_libraries(companion_mobile PUBLIC
+  companion_core
+  companion_codex
+  companion_windows_security
+  Qt6::Core
+  Qt6::Gui
+  Qt6::Network
+  Qt6::WebSockets
+  Qt6::Concurrent
+  Version
+)
+companion_enable_warnings(companion_mobile)

@@ -1,0 +1,31 @@
+{
+  "channelID" : "eSyhONfJ1y6Jx2xFO1drQDpNAcFv_zWi",
+  "ciphertext" : {
+    "base64" : "8tlhblpjxC7DoQXDtD9jBroD04A0VpebkKcB9lv0hEE=",
+    "hex" : "f2d9616e5a63c42ec3a105c3b43f6306ba03d3803456979b90a701f65bf48441"
+  },
+  "combined" : {
+    "base64" : "AAECAwQFBgcICQoL8tlhblpjxC7DoQXDtD9jBroD04A0VpebkKcB9lv0hEFL4Trmka30S6IwP9ekZYEK",
+    "hex" : "000102030405060708090a0bf2d9616e5a63c42ec3a105c3b43f6306ba03d3803456979b90a701f65bf484414be13ae691adf44ba2303fd7a465810a"
+  },
+  "fixedInputSHA256" : "518fb32ab6eca40abdf99ce0f595c37bcc92f0d1494f6ca3e99dae51f7ca7d88",
+  "header" : {
+    "base64" : "eyJjaGFubmVsSUQiOiJlU3loT05mSjF5Nkp4MnhGTzFkclFEcE5BY0Z2X3pXaSIsInNlbmRlcklEIjoiaXBob25lLWZpeHR1cmUiLCJzZW50QXRNaWxsaXNlY29uZHMiOjE3MDAwMDAwMDAxMjMsInNlcXVlbmNlIjo0MiwidmVyc2lvbiI6MX0=",
+    "hex" : "7b226368616e6e656c4944223a22655379684f4e664a3179364a783278464f3164725144704e416346765f7a5769222c2273656e6465724944223a226970686f6e652d66697874757265222c2273656e7441744d696c6c697365636f6e6473223a313730303030303030303132332c2273657175656e6365223a34322c2276657273696f6e223a317d"
+  },
+  "headerUTF8" : "{\"channelID\":\"eSyhONfJ1y6Jx2xFO1drQDpNAcFv_zWi\",\"senderID\":\"iphone-fixture\",\"sentAtMilliseconds\":1700000000123,\"sequence\":42,\"version\":1}",
+  "nonce" : {
+    "base64" : "AAECAwQFBgcICQoL",
+    "hex" : "000102030405060708090a0b"
+  },
+  "payload" : {
+    "base64" : "eyJpbnN0YW50IjowLCJtZXNzYWdlIjoidjAuMy40In0=",
+    "hex" : "7b22696e7374616e74223a302c226d657373616765223a2276302e332e34227d"
+  },
+  "payloadUTF8" : "{\"instant\":0,\"message\":\"v0.3.4\"}",
+  "sourceCommit" : "35b9ded3a96e9b4fd2787cbd7ef1e8859264ff1b",
+  "tag" : {
+    "base64" : "S+E65pGt9EuiMD/XpGWBCg==",
+    "hex" : "4be13ae691adf44ba2303fd7a465810a"
+  }
+}

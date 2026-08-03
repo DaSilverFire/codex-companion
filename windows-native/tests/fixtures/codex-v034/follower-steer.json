@@ -1,0 +1,67 @@
+{
+  "type": "request",
+  "requestId": "steer-id",
+  "sourceClientId": "client-id",
+  "version": 1,
+  "method": "thread-follower-steer-turn",
+  "params": {
+    "conversationId": "thread-id",
+    "clientUserMessageId": "message-id",
+    "input": [
+      {
+        "type": "text",
+        "text": "Use these references",
+        "text_elements": []
+      },
+      {
+        "type": "localImage",
+        "path": "C:/staged/reference.png"
+      }
+    ],
+    "serviceTier": null,
+    "attachments": [
+      {
+        "label": "notes.txt",
+        "path": "C:/staged/notes.txt",
+        "fsPath": "C:/staged/notes.txt"
+      },
+      {
+        "label": "reference.png",
+        "path": "C:/staged/reference.png",
+        "fsPath": "C:/staged/reference.png"
+      }
+    ],
+    "restoreMessage": {
+      "id": "message-id",
+      "text": "Use these references",
+      "context": {
+        "prompt": "Use these references",
+        "addedFiles": [],
+        "fileAttachments": [
+          {
+            "label": "notes.txt",
+            "path": "C:/staged/notes.txt",
+            "fsPath": "C:/staged/notes.txt"
+          }
+        ],
+        "ideContext": null,
+        "imageAttachments": [
+          {
+            "id": "00000000-0000-0000-0000-000000000002",
+            "src": "file:///C:/staged/reference.png",
+            "filename": "reference.png",
+            "localPath": "C:/staged/reference.png",
+            "uploadStatus": "uploaded",
+            "mimeType": "image/png"
+          }
+        ],
+        "workspaceRoots": [
+          "C:/work/repo"
+        ]
+      },
+      "createdAt": 1234,
+      "cwd": "C:/work/repo"
+    }
+  },
+  "timeoutMs": 30000
+}

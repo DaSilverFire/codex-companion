@@ -1,0 +1,6 @@
+add_subdirectory(foundation)
+add_subdirectory(update)
+add_subdirectory(codex)
+add_subdirectory(mobile)
+add_subdirectory(ui)
+add_subdirectory(packaging)

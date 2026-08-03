@@ -1,0 +1,8 @@
+{
+  "manifestUrl": "@CODEX_COMPANION_WINDOWS_UPDATE_MANIFEST_URL@",
+  "publicKeyBase64": "@CODEX_COMPANION_WINDOWS_UPDATE_PUBLIC_KEY@",
+  "signerSha256": "@CODEX_COMPANION_WINDOWS_SIGNER_SHA256@",
+  "platform": "windows",
+  "architecture": "x64",
+  "minimumSystemVersion": "10.0.22000"
+}

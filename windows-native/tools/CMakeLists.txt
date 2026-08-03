@@ -1,0 +1,6 @@
+add_subdirectory(icon-compiler)
+add_subdirectory(window-verifier)
+add_subdirectory(release-verifier)
+add_subdirectory(update-manifest-signer)
+add_subdirectory(companion-mobile-probe)
+add_subdirectory(mobile-startup-probe)

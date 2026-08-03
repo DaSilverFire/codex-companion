@@ -1,0 +1,62 @@
+{
+  "animations": [
+    {
+      "frameCount": 4,
+      "frameDurationsMilliseconds": [
+        400,
+        160,
+        160,
+        520
+      ],
+      "posterFrame": 0,
+      "row": 0,
+      "state": "idle"
+    },
+    {
+      "frameCount": 4,
+      "frameDurationsMilliseconds": [
+        180,
+        140,
+        180,
+        260
+      ],
+      "posterFrame": 0,
+      "row": 1,
+      "state": "thinking"
+    },
+    {
+      "frameCount": 4,
+      "frameDurationsMilliseconds": [
+        110,
+        90,
+        110,
+        150
+      ],
+      "posterFrame": 0,
+      "row": 2,
+      "state": "talking"
+    }
+  ],
+  "assetVersion": "1",
+  "atlas": {
+    "cellHeight": 128,
+    "cellWidth": 128,
+    "columns": 4,
+    "file": {
+      "byteCount": 691112,
+      "name": "atlas.png",
+      "sha256": "0edc426f78aa5211741d90e28a5e4810c555779b6c47ef01c4932e69e96f4342"
+    },
+    "rows": 3
+  },
+  "contentHash": "20f53b7f5c377426581f06c213c6f238ed3bbcaec70c468813295c9c96132804",
+  "displayName": "Fixture Pet",
+  "packageID": "fixture-pet-mobile-presence-v1",
+  "petID": "fixture-pet",
+  "schemaVersion": 1,
+  "thumbnail": {
+    "byteCount": 57752,
+    "name": "thumbnail.png",
+    "sha256": "e3062dacaf5a040ede4f496bab235440a010615ff710b4cbc5c25ab791be078b"
+  }
+}

@@ -1,0 +1,55 @@
+set(
+  companion_deploy_prefix
+  "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}"
+)
+set(
+  companion_deployed_executable
+  "${companion_deploy_prefix}/@CMAKE_INSTALL_BINDIR@/CodexCompanion.exe"
+)
+set(
+  companion_qt_deploy_probe
+  "@COMPANION_QT_DEPLOY_PROBE_EXECUTABLE@"
+)
+
+if(NOT EXISTS "${companion_deployed_executable}")
+  message(FATAL_ERROR
+    "The staged Companion executable is unavailable: "
+    "${companion_deployed_executable}"
+  )
+endif()
+if(NOT EXISTS "${companion_qt_deploy_probe}")
+  message(FATAL_ERROR
+    "The Qt deployment probe is unavailable: "
+    "${companion_qt_deploy_probe}"
+  )
+endif()
+
+execute_process(
+  COMMAND
+    "@COMPANION_WINDEPLOYQT_EXECUTABLE@"
+    "${companion_qt_deploy_probe}"
+    -network
+    -sql
+    -qml
+    -quick
+    -quickcontrols2
+    --dir "."
+    --libdir "@CMAKE_INSTALL_BINDIR@"
+    --plugindir "plugins"
+    --qml-deploy-dir "qml"
+    --translationdir "translations"
+    --force
+    --no-translations
+    --no-compiler-runtime
+    "@COMPANION_QT_DEPLOY_MODE@"
+    --qtpaths "@COMPANION_QTPATHS_EXECUTABLE@"
+    --qmldir "@PROJECT_SOURCE_DIR@/src/ui/qml"
+  WORKING_DIRECTORY "${companion_deploy_prefix}"
+  RESULT_VARIABLE companion_qml_deploy_result
+)
+if(NOT companion_qml_deploy_result EQUAL 0)
+  message(FATAL_ERROR
+    "Companion QML deployment failed with exit code "
+    "${companion_qml_deploy_result}."
+  )
+endif()

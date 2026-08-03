@@ -1,0 +1,4 @@
+{"id":1,"method":"initialize","params":{"clientInfo":{"name":"codex-companion-mobile","title":"Codex Companion Mobile","version":"0.3.4-windows"},"capabilities":{"experimentalApi":true,"optOutNotificationMethods":[]}}}
+{"method":"initialized"}
+{"id":2,"method":"thread/start","params":{"ephemeral":false,"serviceName":"codex-companion-mobile","cwd":"C:\\repo","model":"gpt-5.6"}}
+{"id":3,"method":"turn/start","params":{"threadId":"thread-created","input":[{"type":"text","text":"Build the Windows bridge","text_elements":[]},{"type":"skill","name":"design-and-build","path":"C:\\skills\\design-and-build\\SKILL.md"},{"type":"localImage","path":"C:\\staged\\reference.png"},{"type":"mention","name":"design.md","path":"C:\\staged\\design.md"}],"clientUserMessageId":"message-stable","model":"gpt-5.6","effort":"high"}}

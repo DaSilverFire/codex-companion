@@ -5,3 +5,7 @@ node_modules/
 /qa/
 /.codex/
 /.codex-dev-cache/
+/windows-native/.deps/
+/windows-native/build*/
+/windows-native/dist/
+/windows-native/work/

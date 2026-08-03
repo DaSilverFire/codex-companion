@@ -1,0 +1,57 @@
+{
+  "version": 8,
+  "configurePresets": [
+    {
+      "name": "windows-msvc-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/work/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_CXX_STANDARD_REQUIRED": "ON",
+        "CMAKE_CXX_EXTENSIONS": "OFF",
+        "CompanionRelayURL": "wss://codex-companion-relay.silverfire-codex-companion.workers.dev/relay",
+        "CMAKE_PREFIX_PATH": "$env{QT_ROOT};${sourceDir}/windows-native/.deps/qt-6.11.1",
+        "QT_ADDITIONAL_PACKAGES_PREFIX_PATH": "${sourceDir}/windows-native/.deps/qt-6.11.1",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/windows-native/.deps/vcpkg/a9f0cd0345fb29cd227d802f1fd1917c28f8e5a3/source/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static-md",
+        "VCPKG_INSTALLED_DIR": "${sourceDir}/windows-native/.deps/vcpkg/a9f0cd0345fb29cd227d802f1fd1917c28f8e5a3/installed",
+        "VCPKG_MANIFEST_INSTALL": "OFF",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      },
+      "environment": {
+        "PATH": "$env{QT_ROOT}/bin;$penv{PATH}"
+      }
+    },
+    {
+      "name": "windows-msvc-debug",
+      "inherits": "windows-msvc-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "windows-msvc-release",
+      "inherits": "windows-msvc-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "windows-msvc-debug", "configurePreset": "windows-msvc-debug" },
+    { "name": "windows-msvc-release", "configurePreset": "windows-msvc-release" }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-msvc-debug",
+      "configurePreset": "windows-msvc-debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "windows-msvc-release",
+      "configurePreset": "windows-msvc-release",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

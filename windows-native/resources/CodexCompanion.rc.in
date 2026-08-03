@@ -1,0 +1,37 @@
+#include <windows.h>
+
+#define IDI_CODEX_COMPANION 101
+IDI_CODEX_COMPANION ICON "@COMPANION_ICON_PATH@"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,@CODEX_COMPANION_WINDOWS_BUILD@
+ PRODUCTVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,@CODEX_COMPANION_WINDOWS_BUILD@
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "DaSilverFire\0"
+            VALUE "FileDescription", "Codex Companion\0"
+            VALUE "FileVersion", "@PROJECT_VERSION@.@CODEX_COMPANION_WINDOWS_BUILD@\0"
+            VALUE "InternalName", "CodexCompanion\0"
+            VALUE "OriginalFilename", "CodexCompanion.exe\0"
+            VALUE "ProductName", "Codex Companion\0"
+            VALUE "ProductVersion", "@PROJECT_VERSION@.@CODEX_COMPANION_WINDOWS_BUILD@\0"
+            VALUE "CompanionRelayURL", "@CompanionRelayURL@\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

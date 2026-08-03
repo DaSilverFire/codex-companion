@@ -1,0 +1,42 @@
+[
+  {
+    "left": "0.3.4",
+    "right": "0.3.3",
+    "order": 1
+  },
+  {
+    "left": "0.3.4",
+    "right": "0.3.4.0",
+    "order": 0
+  },
+  {
+    "left": "0.3.4",
+    "right": "0.3.5",
+    "order": -1
+  },
+  {
+    "left": "0.3.4-beta.2",
+    "right": "0.3.4",
+    "order": -1
+  },
+  {
+    "left": "0.3.4-beta.2",
+    "right": "0.3.4-beta.10",
+    "order": -1
+  },
+  {
+    "left": "0.3.4-2",
+    "right": "0.3.4-alpha",
+    "order": -1
+  },
+  {
+    "left": "0.3.4-alpha",
+    "right": "0.3.4-beta",
+    "order": -1
+  },
+  {
+    "left": "0.3.4+one",
+    "right": "0.3.4+two",
+    "order": 0
+  }
+]

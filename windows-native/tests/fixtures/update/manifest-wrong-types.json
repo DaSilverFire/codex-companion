@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "version": "0.3.4",
+  "build": "34",
+  "minimumSystemVersion": "10.0.22000",
+  "publishedAt": "2026-07-19T12:34:56Z",
+  "downloadURL": "https://updates.example.test/Codex-Companion-0.3.4-34-windows-x64.exe",
+  "sha256": "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789",
+  "size": 42000,
+  "signature": "c1gniUYeQyhXDDv4MzJEqoECtlZHV5/c2rra0Ek8LM/urOJb6TeL3LQUOw853IJC3YvhsQNoQyecJFdlVMYoDA=="
+}
