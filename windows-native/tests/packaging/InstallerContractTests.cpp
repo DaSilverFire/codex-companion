@@ -443,7 +443,7 @@ void InstallerContractTests::
             "Flags: ignoreversion recursesubdirs createallsubdirs"),
         QStringLiteral(
             "Source: \"{#SourceDir}\\resources\\skills\\companion-pet\\*\"; "
-            "DestDir: \"{userprofile}\\.codex\\skills\\companion-pet\"; "
+            "DestDir: \"{%USERPROFILE}\\.codex\\skills\\companion-pet\"; "
             "Flags: ignoreversion recursesubdirs createallsubdirs "
             "uninsneveruninstall"),
     };

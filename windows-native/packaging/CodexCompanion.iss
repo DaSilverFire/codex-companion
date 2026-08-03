@@ -34,7 +34,7 @@ SignTool=companion
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SourceDir}\resources\skills\companion-pet\*"; DestDir: "{userprofile}\.codex\skills\companion-pet"; Flags: ignoreversion recursesubdirs createallsubdirs uninsneveruninstall
+Source: "{#SourceDir}\resources\skills\companion-pet\*"; DestDir: "{%USERPROFILE}\.codex\skills\companion-pet"; Flags: ignoreversion recursesubdirs createallsubdirs uninsneveruninstall
 
 [Icons]
 Name: "{group}\Codex Companion"; Filename: "{app}\bin\CodexCompanion.exe"; WorkingDir: "{app}\bin"; IconFilename: "{app}\bin\CodexCompanion.exe"

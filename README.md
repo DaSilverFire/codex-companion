@@ -27,7 +27,7 @@ Pre-notarized releases ask for confirmation during installation. macOS may also 
 Normal users do not need Visual Studio or Qt.
 
 1. Download the Windows installer from GitHub Releases.
-2. Open `Codex-Companion-Setup-0.3.5.exe`.
+2. Open `Codex-Companion-0.3.5-1-windows-x64.exe`.
 3. Complete the installer and launch Codex Companion from the Start menu.
 
 The Windows installer includes the Companion runtime and the generic `companion-pet` skill. It intentionally contains no personal pet artwork. Existing pets in the user's Codex or Companion pet folders are discovered automatically.
