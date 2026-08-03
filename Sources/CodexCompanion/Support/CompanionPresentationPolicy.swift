@@ -27,6 +27,7 @@ struct PetRoamingMotionPrimer {
 }
 
 enum CompanionProcessAction: Hashable {
+    case retry
     case reply
     case steer
 }
@@ -59,7 +60,7 @@ enum CompanionPresentationPolicy {
         case .running, .completed:
             return [.reply, .steer]
         case .failed:
-            return [.reply]
+            return [.retry, .reply]
         case .waiting:
             return []
         }
@@ -77,6 +78,19 @@ enum CompanionPresentationPolicy {
             return .yellow
         }
         return attentionAccent
+    }
+
+    static func processStatusLabel(for status: CodexProcessItem.Status) -> String {
+        switch status {
+        case .running:
+            return "Still working"
+        case .completed:
+            return "Completed"
+        case .failed:
+            return "Failed or disconnected"
+        case .waiting:
+            return "Needs your attention"
+        }
     }
 
     static func pausesRoaming(

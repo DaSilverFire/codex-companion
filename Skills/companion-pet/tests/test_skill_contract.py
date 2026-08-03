@@ -28,9 +28,8 @@ class SkillContractTests(unittest.TestCase):
             "runtime-installable",
             "thinking",
             "talking",
-            "four total cat legs",
-            "black nose",
-            "golden eyes",
+            "correct native anatomy",
+            "identity-defining",
             "nearest-neighbor",
             "do not install",
         )
@@ -62,6 +61,40 @@ class SkillContractTests(unittest.TestCase):
             "never overwrite an existing pet package",
             "manual semantic review",
             "frame hashes",
+        )
+        for phrase in required:
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
+    def test_skill_documents_copy_first_companion_conversion(self):
+        text = SKILL_PATH.read_text(encoding="utf-8").lower()
+        required = (
+            "prepare-conversion",
+            "goal-complete, thinking, and talking",
+            "package-companion",
+            "look-spritesheet.webp",
+            "never overwrites",
+            "companion-ready",
+        )
+        for phrase in required:
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
+    def test_skill_documents_separate_compact_mobile_presence_workflow(self):
+        text = SKILL_PATH.read_text(encoding="utf-8").lower()
+        required = (
+            "prepare-mobile-presence",
+            "package-mobile-presence",
+            "authored separately",
+            "not a downscaled desktop",
+            "variable per state",
+            "1-32 frames",
+            "8 mib",
+            "atomic",
+            "idle, thinking, and talking",
+            "portrait medallion",
+            "reference-appropriate",
+            "must not invent",
         )
         for phrase in required:
             with self.subTest(phrase=phrase):

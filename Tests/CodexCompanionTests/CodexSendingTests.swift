@@ -250,6 +250,96 @@ struct CodexSendingTests {
     }
 
     @Test
+    @MainActor
+    func retryingAFailedProcessResumesItsPausedGoalAndSendsOneContinueReply() async throws {
+        let isolated = try TestDefaults()
+        defer { isolated.reset() }
+        let recorder = FailedProcessRetryRecorder()
+        let processStore = CodexProcessStore(
+            readGoals: { _ in [:] },
+            writeGoal: { threadID, objective, status, tokenBudget in
+                recorder.recordGoal(status)
+                return CodexGoalSnapshot(
+                    threadID: threadID,
+                    objective: objective ?? "Finish the task",
+                    status: status ?? .paused,
+                    tokenBudget: tokenBudget,
+                    tokensUsed: 0,
+                    timeUsedSeconds: 0,
+                    createdAt: 1,
+                    updatedAt: 2
+                )
+            },
+            defaults: isolated.defaults
+        )
+        let model = Self.makeModel(
+            defaults: isolated.defaults,
+            processStore: processStore
+        ) { prompt, _, _, action, expectedTurnID, _, _ in
+            recorder.recordSend(
+                prompt: prompt,
+                action: action,
+                expectedTurnID: expectedTurnID
+            )
+            return .sent
+        }
+        await Task.yield()
+        let failedItem = Self.processItem(
+            status: .failed,
+            activeTurnID: "stale-completed-turn",
+            runtimeStatus: .idle,
+            goalID: "goal-current",
+            goalObjective: "Finish the task",
+            goalStatus: .paused
+        )
+
+        model.retry(failedItem)
+
+        #expect(await Self.waitUntil {
+            recorder.sendCount == 1 && !model.isCodexSending
+        })
+        #expect(recorder.prompts == ["continue"])
+        #expect(recorder.actions == [.reply])
+        #expect(recorder.expectedTurnIDs == [nil])
+        #expect(recorder.goalStatuses == [.active])
+        #expect(model.activeProcessTarget == nil)
+        #expect(model.prompt.isEmpty)
+    }
+
+    @Test
+    @MainActor
+    func retryingAFailedProcessRefusesApprovalPendingWork() async throws {
+        let isolated = try TestDefaults()
+        defer { isolated.reset() }
+        let recorder = FailedProcessRetryRecorder()
+        let model = Self.makeModel(defaults: isolated.defaults) {
+            prompt, _, _, action, expectedTurnID, _, _ in
+            recorder.recordSend(
+                prompt: prompt,
+                action: action,
+                expectedTurnID: expectedTurnID
+            )
+            return .sent
+        }
+        await Task.yield()
+        let failedItem = Self.processItem(
+            status: .failed,
+            runtimeStatus: .waitingOnApproval,
+            goalID: "goal-current",
+            goalObjective: "Finish the task",
+            goalStatus: .paused
+        )
+
+        model.retry(failedItem)
+        try? await Task.sleep(for: .milliseconds(50))
+
+        #expect(recorder.sendCount == 0)
+        #expect(model.retryingProcessID == nil)
+        #expect(model.activeProcessTarget == nil)
+        #expect(model.status == "Wait for Current task to stop before retrying it.")
+    }
+
+    @Test
     func malformedTurnsListIsNotTreatedAsIdle() {
         let malformed: [String: Any] = [
             "result": ["data": "not-a-turn-array"],
@@ -323,6 +413,7 @@ struct CodexSendingTests {
     @MainActor
     private static func makeModel(
         defaults: UserDefaults,
+        processStore: CodexProcessStore? = nil,
         sendTimeout: Duration = .seconds(50),
         submitter: @escaping CodexPromptSubmitter,
         approvalSubmitter: @escaping CodexApprovalSubmitter = { _, _ in .requestNotFound }
@@ -334,6 +425,7 @@ struct CodexSendingTests {
             ),
             petVisibilityPreference: PetVisibilityPreference(defaults: defaults),
             interactionPreferences: CompanionInteractionPreferences(defaults: defaults),
+            processStore: processStore ?? CodexProcessStore(defaults: defaults),
             codexPromptSubmitter: submitter,
             codexApprovalSubmitter: approvalSubmitter,
             codexSendTimeout: sendTimeout,
@@ -347,7 +439,10 @@ struct CodexSendingTests {
         status: CodexProcessItem.Status = .running,
         cwd: String = "/tmp/current-task",
         activeTurnID: String? = nil,
-        runtimeStatus: CodexThreadRuntimeStatus? = nil
+        runtimeStatus: CodexThreadRuntimeStatus? = nil,
+        goalID: String? = nil,
+        goalObjective: String? = nil,
+        goalStatus: CodexGoalStatus? = nil
     ) -> CodexProcessItem {
         CodexProcessItem(
             id: id,
@@ -361,9 +456,9 @@ struct CodexSendingTests {
             threadID: id,
             cwd: cwd,
             activeTurnID: activeTurnID,
-            goalID: nil,
-            goalObjective: nil,
-            goalStatus: nil,
+            goalID: goalID,
+            goalObjective: goalObjective,
+            goalStatus: goalStatus,
             goalElapsedSeconds: nil,
             goalTimerReferenceDate: nil,
             runtimeStatus: runtimeStatus
@@ -471,6 +566,52 @@ private final class PromptInvocationRecorder: @unchecked Sendable {
 
     var action: CodexSendAction? {
         lock.withLock { storedAction }
+    }
+}
+
+private final class FailedProcessRetryRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedPrompts: [String] = []
+    private var storedActions: [CodexSendAction] = []
+    private var storedExpectedTurnIDs: [String?] = []
+    private var storedGoalStatuses: [CodexGoalStatus?] = []
+
+    func recordSend(
+        prompt: String,
+        action: CodexSendAction,
+        expectedTurnID: String?
+    ) {
+        lock.withLock {
+            storedPrompts.append(prompt)
+            storedActions.append(action)
+            storedExpectedTurnIDs.append(expectedTurnID)
+        }
+    }
+
+    func recordGoal(_ status: CodexGoalStatus?) {
+        lock.withLock {
+            storedGoalStatuses.append(status)
+        }
+    }
+
+    var prompts: [String] {
+        lock.withLock { storedPrompts }
+    }
+
+    var actions: [CodexSendAction] {
+        lock.withLock { storedActions }
+    }
+
+    var expectedTurnIDs: [String?] {
+        lock.withLock { storedExpectedTurnIDs }
+    }
+
+    var goalStatuses: [CodexGoalStatus?] {
+        lock.withLock { storedGoalStatuses }
+    }
+
+    var sendCount: Int {
+        lock.withLock { storedPrompts.count }
     }
 }
 

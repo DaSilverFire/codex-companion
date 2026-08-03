@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import SwiftUI
 
 struct QuickBarTrayView: View {
@@ -168,6 +169,7 @@ struct QuickBarTrayView: View {
                         : nil,
                     inlineComposerHeight: inlineComposerHeight,
                     isApproving: model.approvingThreadID == item.threadID,
+                    isRetrying: model.retryingProcessID == item.id,
                     accountProfiles: model.hoveredProcessID == item.id
                         ? model.availableCodexAccountProfiles(for: item)
                         : [],
@@ -184,25 +186,35 @@ struct QuickBarTrayView: View {
                     cancelGoalEditing: model.cancelGoalEditing,
                     updateGoalDraft: model.updateGoalDraft,
                     saveGoal: model.saveGoalEdit,
-                    resumeGoal: model.resumeGoal
-                ) {
-                    model.reply(to: item)
-                    promptFocused = true
-                } steer: {
-                    model.steer(item)
-                    promptFocused = true
-                } approveOnce: {
-                    model.approveOnce(item)
-                } approveSimilar: {
-                    model.approveSimilarCommands(item)
-                } tellCodex: {
-                    model.tellCodexSomethingElse(item)
-                    promptFocused = true
-                } switchAccount: { profile in
-                    model.switchCodexAccount(for: item, to: profile)
-                } dismissAccountHandoffFeedback: {
-                    model.dismissAccountHandoffFeedback(for: item.id)
-                }
+                    resumeGoal: model.resumeGoal,
+                    retry: {
+                        model.retry(item)
+                    },
+                    reply: {
+                        model.reply(to: item)
+                        promptFocused = true
+                    },
+                    steer: {
+                        model.steer(item)
+                        promptFocused = true
+                    },
+                    approveOnce: {
+                        model.approveOnce(item)
+                    },
+                    approveSimilar: {
+                        model.approveSimilarCommands(item)
+                    },
+                    tellCodex: {
+                        model.tellCodexSomethingElse(item)
+                        promptFocused = true
+                    },
+                    switchAccount: { profile in
+                        model.switchCodexAccount(for: item, to: profile)
+                    },
+                    dismissAccountHandoffFeedback: {
+                        model.dismissAccountHandoffFeedback(for: item.id)
+                    }
+                )
                 .id(item.id)
             }
         }
@@ -687,9 +699,15 @@ private struct ChatDeliveryMenuButton: View {
 
     var body: some View {
         Button {
-            withAnimation(TrayAnimation.glassMorph) {
-                isPresented.toggle()
-            }
+            CodexUsagePanel.shared.dismiss()
+            ChatDeliveryPanel.shared.toggle(
+                model: model,
+                presentationChanged: { presented in
+                    withAnimation(TrayAnimation.glassMorph) {
+                        isPresented = presented
+                    }
+                }
+            )
         } label: {
             HStack(spacing: 5) {
                 Text(compactTitle)
@@ -718,11 +736,6 @@ private struct ChatDeliveryMenuButton: View {
         .buttonStyle(.plain)
         .accessibilityLabel("Chat service and model")
         .help("Chat service and model")
-        .popover(isPresented: $isPresented, arrowEdge: .bottom) {
-            ChatDeliveryPicker(model: model) {
-                isPresented = false
-            }
-        }
         .animation(TrayAnimation.glassMorph, value: isPresented)
     }
 
@@ -1028,56 +1041,160 @@ struct ChatDeliveryPicker: View {
 
     var body: some View {
         pickerContent
-            .companionLiquidGlassMenuSurface(cornerRadius: 20)
+            .companionLiquidGlassMenuSurface(
+                cornerRadius: CodexUsagePresentationMetrics.cornerRadius
+            )
     }
 
     private var pickerContent: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Chat model")
-                .font(.system(size: 12, weight: .semibold))
-                .padding(.horizontal, 4)
+        VStack(alignment: .leading, spacing: 10) {
+            header
 
-            deliveryButton(
-                title: "On-device Apple model",
-                detail: "On-device reasoning · live tools available",
-                isSelected: model.selectedChatGPTDeliveryMode == .onDevice
-            ) {
-                model.useOnDeviceChat()
-                dismiss()
+            HStack(spacing: 8) {
+                Label("Service", systemImage: "point.3.connected.trianglepath.dotted")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 0)
+
+                Picker("Chat service", selection: selectedDeliverySection) {
+                    ForEach(model.selectableChatGPTDeliveryModes) { mode in
+                        Text(mode.shortTitle).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 112)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 34)
+            .background(
+                .primary.opacity(0.035),
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+            )
+
+            selectedModelSection
+        }
+        .padding(11)
+        .frame(
+            width: ChatDeliveryPresentationMetrics.panelWidth,
+            alignment: .leading
+        )
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 13, weight: .semibold))
+                .frame(
+                    width: CodexUsagePresentationMetrics.iconButtonSize,
+                    height: CodexUsagePresentationMetrics.iconButtonSize
+                )
+                .background(.primary.opacity(0.07), in: Circle())
+
+            VStack(alignment: .leading, spacing: 2) {
+                Label("Chat model", systemImage: "sparkles")
+                    .labelStyle(.titleOnly)
+                    .font(.system(size: 13, weight: .semibold))
+
+                Text(selectedModelSummary)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
 
-            Divider()
+            Spacer(minLength: 0)
+        }
+    }
 
-            ForEach(ChatGPTModel.allCases) { chatModel in
-                deliveryButton(
-                    title: chatModel.shortTitle,
-                    detail: "OpenAI API · \(chatModel.costNote)",
-                    isSelected: model.selectedChatGPTDeliveryMode == .openAIAPI
-                        && model.selectedChatGPTModel == chatModel
-                ) {
-                    model.selectedChatGPTModel = chatModel
+    private var selectedModelSummary: String {
+        switch model.selectedChatGPTDeliveryMode {
+        case .onDevice:
+            return "Apple on-device model"
+        case .openAIAPI:
+            return "OpenAI API · \(model.selectedChatGPTModel.shortTitle)"
+        case .lumoAPI:
+            return "Lumo API · \(model.selectedLumoModel.shortTitle)"
+        }
+    }
+
+    private var selectedDeliverySection: Binding<ChatGPTDeliveryMode> {
+        Binding(
+            get: { model.selectedChatGPTDeliveryMode },
+            set: { mode in
+                switch mode {
+                case .onDevice:
+                    model.useOnDeviceChat()
+                case .openAIAPI:
                     model.useChatGPTAPI()
-                    dismiss()
+                case .lumoAPI:
+                    model.useLumoAPI()
                 }
             }
+        )
+    }
 
-            Divider()
-
-            ForEach(LumoModel.allCases) { lumoModel in
-                deliveryButton(
-                    title: lumoModel.title,
-                    detail: "Lumo API · \(lumoModel.capabilityNote)",
-                    isSelected: model.selectedChatGPTDeliveryMode == .lumoAPI
-                        && model.selectedLumoModel == lumoModel
-                ) {
-                    model.selectedLumoModel = lumoModel
-                    model.useLumoAPI()
-                    dismiss()
+    @ViewBuilder
+    private var selectedModelSection: some View {
+        switch model.selectedChatGPTDeliveryMode {
+        case .onDevice:
+            deliverySection(title: "Apple", systemImage: "apple.logo") {
+                selectedModelRow(
+                    title: "On-device model",
+                    detail: "Private reasoning with live tools"
+                )
+            }
+        case .openAIAPI:
+            deliverySection(title: "OpenAI model", systemImage: "sparkles") {
+                ForEach(ChatGPTModel.allCases) { chatModel in
+                    deliveryButton(
+                        title: chatModel.shortTitle,
+                        detail: chatModel.costNote,
+                        isSelected: model.selectedChatGPTModel == chatModel
+                    ) {
+                        model.selectedChatGPTModel = chatModel
+                        model.useChatGPTAPI()
+                        dismiss()
+                    }
+                }
+            }
+        case .lumoAPI:
+            deliverySection(title: "Lumo model", systemImage: "shield.lefthalf.filled") {
+                ForEach(LumoModel.allCases) { lumoModel in
+                    deliveryButton(
+                        title: lumoModel.shortTitle,
+                        detail: lumoModel.capabilityNote,
+                        isSelected: model.selectedLumoModel == lumoModel
+                    ) {
+                        model.selectedLumoModel = lumoModel
+                        model.useLumoAPI()
+                        dismiss()
+                    }
                 }
             }
         }
-        .padding(10)
-        .frame(width: 238)
+    }
+
+    private func deliverySection<Content: View>(
+        title: String,
+        systemImage: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 5)
+
+            VStack(spacing: 2) {
+                content()
+            }
+            .padding(3)
+            .background(
+                .primary.opacity(0.035),
+                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+            )
+        }
     }
 
     private func deliveryButton(
@@ -1103,10 +1220,35 @@ struct ChatDeliveryPicker: View {
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 8)
-            .frame(height: 38)
+            .frame(height: 34)
+            .background(
+                isSelected ? Color.accentColor.opacity(0.14) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+            )
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
+    }
+
+    private func selectedModelRow(title: String, detail: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .frame(width: 15)
+                .foregroundStyle(.tint)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                Text(detail)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 36)
     }
 }
 
@@ -1215,6 +1357,48 @@ private struct ProcessLoadingCard: View {
     }
 }
 
+@MainActor
+final class ProcessHoverLatch {
+    private let exitDelay: Duration
+    private var isHovering = false
+    private var pendingExit: Task<Void, Never>?
+
+    init(exitDelay: Duration = .milliseconds(120)) {
+        self.exitDelay = exitDelay
+    }
+
+    func update(
+        isHovering nextValue: Bool,
+        apply: @escaping @MainActor (Bool) -> Void
+    ) {
+        pendingExit?.cancel()
+        pendingExit = nil
+
+        if nextValue {
+            guard !isHovering else { return }
+            isHovering = true
+            apply(true)
+            return
+        }
+
+        guard isHovering else { return }
+        let delay = exitDelay
+        pendingExit = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                return
+            }
+
+            guard let self else { return }
+            self.pendingExit = nil
+            guard self.isHovering else { return }
+            self.isHovering = false
+            apply(false)
+        }
+    }
+}
+
 private struct ProcessCard: View {
     var item: CodexProcessItem
     var isHovering: Bool
@@ -1223,6 +1407,7 @@ private struct ProcessCard: View {
     var inlineComposer: AnyView?
     var inlineComposerHeight: CGFloat
     var isApproving: Bool
+    var isRetrying: Bool
     var accountProfiles: [CodexAccountProfile]
     var isSwitchingAccount: Bool
     var accountHandoffFeedback: CodexAccountHandoffFeedback?
@@ -1236,6 +1421,7 @@ private struct ProcessCard: View {
     var updateGoalDraft: (String) -> Void
     var saveGoal: () -> Void
     var resumeGoal: () -> Void
+    var retry: () -> Void
     var reply: () -> Void
     var steer: () -> Void
     var approveOnce: () -> Void
@@ -1243,6 +1429,8 @@ private struct ProcessCard: View {
     var tellCodex: () -> Void
     var switchAccount: (CodexAccountProfile) -> Void
     var dismissAccountHandoffFeedback: () -> Void
+
+    @State private var hoverLatch = ProcessHoverLatch()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -1304,6 +1492,15 @@ private struct ProcessCard: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
             } else if !processActions.isEmpty || !accountProfiles.isEmpty {
                 HStack(spacing: 6) {
+                    if processActions.contains(.retry) {
+                        ProcessActionButton(
+                            title: "Retry",
+                            systemName: "arrow.clockwise",
+                            accessibilityLabel: "Retry \(item.title)",
+                            isEnabled: !isRetrying,
+                            action: retry
+                        )
+                    }
                     if processActions.contains(.reply) {
                         ProcessActionButton(
                             title: "Reply",
@@ -1340,6 +1537,7 @@ private struct ProcessCard: View {
             height: PetWindowMetrics.processRowHeight(
                 for: item,
                 showsActions: showsAnyActions,
+                showsExpandedMessage: isHovering,
                 inlineComposerHeight: inlineComposerHeight
             ),
             alignment: .leading
@@ -1352,15 +1550,17 @@ private struct ProcessCard: View {
         )
         .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .onHover { hovering in
-            withAnimation(TrayAnimation.hover) {
-                hoverChanged(hovering)
+            hoverLatch.update(isHovering: hovering) { settledHover in
+                withAnimation(TrayAnimation.hover) {
+                    hoverChanged(settledHover)
+                }
             }
         }
         .animation(TrayAnimation.hover, value: showsAnyActions)
         .animation(TrayAnimation.panel, value: attentionAccent)
         .animation(TrayAnimation.panel, value: item.runtimeStatus)
         .scaleEffect(isHovering ? 1.004 : 1)
-        .help(item.fullMessage)
+        .accessibilityHint(Text(item.fullMessage))
     }
 
     private var processActions: Set<CompanionProcessAction> {
@@ -1549,10 +1749,10 @@ private struct ProcessMessageText: View {
             Text(fullMessage)
                 .font(.system(size: 10))
                 .foregroundStyle(TrayColors.textSecondary)
-                .lineLimit(1)
+                .lineLimit(isExpanded ? 3 : 1)
                 .opacity(isExpanded ? 1 : 0)
         }
-        .frame(height: 14, alignment: .topLeading)
+        .frame(height: isExpanded ? 42 : 14, alignment: .topLeading)
         .clipped()
     }
 }
@@ -1566,9 +1766,8 @@ private struct ProcessStatusBadge: View {
 
             switch status {
             case .running:
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(width: 16, height: 16)
+                ProcessActivityIndicator()
+                    .frame(width: 14, height: 14)
             case .completed:
                 Image(systemName: "checkmark")
                     .font(.system(size: 10, weight: .bold))
@@ -1583,7 +1782,9 @@ private struct ProcessStatusBadge: View {
                     .foregroundStyle(Color.yellow)
             }
         }
-        .help(helpText)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(statusLabel)
+        .help(statusLabel)
     }
 
     private var borderColor: Color {
@@ -1599,17 +1800,128 @@ private struct ProcessStatusBadge: View {
         }
     }
 
-    private var helpText: String {
-        switch status {
-        case .running:
-            return "Still working"
-        case .completed:
-            return "Completed"
-        case .failed:
-            return "Failed or disconnected"
-        case .waiting:
-            return "Needs your attention"
+    private var statusLabel: String {
+        CompanionPresentationPolicy.processStatusLabel(for: status)
+    }
+}
+
+private struct ProcessActivityIndicator: NSViewRepresentable {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeNSView(context: Context) -> ProcessActivityIndicatorLayerView {
+        let indicator = ProcessActivityIndicatorLayerView()
+        indicator.setReducedMotion(reduceMotion)
+        return indicator
+    }
+
+    func updateNSView(_ nsView: ProcessActivityIndicatorLayerView, context: Context) {
+        nsView.setReducedMotion(reduceMotion)
+    }
+}
+
+@MainActor
+final class ProcessActivityIndicatorLayerView: NSView {
+    private enum Metrics {
+        static let arcStart = 0.08
+        static let arcEnd = 0.72
+        static let lineWidth: CGFloat = 1.6
+        static let rotationDuration: CFTimeInterval = 0.9
+        static let rotationAnimationKey = "companion.process-activity.rotation"
+    }
+
+    private let arcLayer = CAShapeLayer()
+
+    convenience init() {
+        self.init(frame: .zero)
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        configureLayer()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configureLayer()
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: 14, height: 14)
+    }
+
+    override func layout() {
+        super.layout()
+        arcLayer.frame = bounds
+
+        let inset = Metrics.lineWidth / 2
+        let radius = max(0, min(bounds.width, bounds.height) / 2 - inset)
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let startAngle = -.pi / 2 + 2 * .pi * Metrics.arcStart
+        let endAngle = -.pi / 2 + 2 * .pi * Metrics.arcEnd
+        let path = CGMutablePath()
+        path.addArc(
+            center: center,
+            radius: radius,
+            startAngle: startAngle,
+            endAngle: endAngle,
+            clockwise: false
+        )
+        arcLayer.path = path
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateStrokeColor()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        arcLayer.contentsScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+    }
+
+    func setReducedMotion(_ reduceMotion: Bool) {
+        if reduceMotion {
+            arcLayer.removeAnimation(forKey: Metrics.rotationAnimationKey)
+            arcLayer.transform = CATransform3DIdentity
+        } else {
+            startRotationIfNeeded()
         }
+    }
+
+    var hasCompositorRotationAnimation: Bool {
+        arcLayer.animation(forKey: Metrics.rotationAnimationKey) != nil
+    }
+
+    var rotationAnimationDuration: CFTimeInterval? {
+        arcLayer.animation(forKey: Metrics.rotationAnimationKey)?.duration
+    }
+
+    private func configureLayer() {
+        wantsLayer = true
+        arcLayer.fillColor = NSColor.clear.cgColor
+        arcLayer.lineWidth = Metrics.lineWidth
+        arcLayer.lineCap = .round
+        layer?.addSublayer(arcLayer)
+        updateStrokeColor()
+    }
+
+    private func updateStrokeColor() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            arcLayer.strokeColor = NSColor.labelColor.withAlphaComponent(0.92).cgColor
+        }
+    }
+
+    private func startRotationIfNeeded() {
+        guard arcLayer.animation(forKey: Metrics.rotationAnimationKey) == nil else { return }
+
+        let animation = CABasicAnimation(keyPath: "transform.rotation.z")
+        animation.fromValue = 0
+        animation.toValue = 2 * Double.pi
+        animation.duration = Metrics.rotationDuration
+        animation.repeatCount = .infinity
+        animation.timingFunction = CAMediaTimingFunction(name: .linear)
+        animation.isRemovedOnCompletion = false
+        arcLayer.add(animation, forKey: Metrics.rotationAnimationKey)
     }
 }
 

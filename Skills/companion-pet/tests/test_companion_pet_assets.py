@@ -68,17 +68,51 @@ def make_grid_source(
     image.save(path)
 
 
+def make_native_pet(path: Path) -> tuple[Path, Path]:
+    path.mkdir(parents=True)
+    manifest_path = path / "pet.json"
+    sheet_path = path / "spritesheet.webp"
+    manifest = {
+        "id": "native-cat",
+        "displayName": "Native Cat",
+        "description": "A native Codex cat.",
+        "spritesheetPath": sheet_path.name,
+        "spriteColumns": 8,
+        "spriteRows": 11,
+        "animationFrameCounts": {
+            "idle": 6,
+            "running-right": 8,
+            "running-left": 8,
+            "waving": 4,
+            "jumping": 5,
+            "failed": 8,
+            "waiting": 6,
+            "running": 6,
+            "review": 6,
+        },
+    }
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    sheet = Image.new("RGBA", (8 * 192, 11 * 208), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(sheet)
+    for row in range(11):
+        color = (20 + row * 10, 40 + row * 7, 60 + row * 5, 255)
+        draw.rectangle((row + 8, row * 208 + 12, 60, row * 208 + 180), fill=color)
+    sheet.save(sheet_path, format="WEBP", lossless=True)
+    return manifest_path, sheet_path
+
+
 def approve_review(path: Path) -> None:
     data = json.loads(path.read_text(encoding="utf-8"))
     for row in data["states"]:
         for frame in row["frames"]:
             frame.update(
                 {
-                    "legCount": 4,
-                    "legsSeparated": True,
+                    "anatomyCorrect": True,
                     "limbsComplete": True,
-                    "blackNose": True,
-                    "goldenEyes": True,
+                    "identityDetailsPreserved": True,
                     "noLabels": True,
                     "noBackground": True,
                     "identityConsistent": True,
@@ -97,14 +131,14 @@ class CompanionPetAssetsTests(unittest.TestCase):
     def test_prepare_defaults_to_current_codex_schema(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            reference = root / "shadow.png"
+            reference = root / "nova.png"
             run_dir = root / "run"
             make_reference(reference)
 
             self.module.prepare_run(
                 run_dir=run_dir,
-                pet_id="shadow",
-                display_name="Shadow",
+                pet_id="nova",
+                display_name="Nova",
                 references=[reference],
                 states=["thinking", "talking"],
                 force=False,
@@ -131,8 +165,8 @@ class CompanionPetAssetsTests(unittest.TestCase):
 
             self.module.prepare_run(
                 run_dir=run_dir,
-                pet_id="shadow",
-                display_name="Shadow",
+                pet_id="nova",
+                display_name="Nova",
                 references=[reference],
                 states=["thinking", "talking"],
                 force=True,
@@ -147,19 +181,25 @@ class CompanionPetAssetsTests(unittest.TestCase):
                 for state in ("thinking", "talking")
             )
             for phrase in (
-                "exactly four total cat legs",
-                "black nose",
-                "golden eyes",
+                "correct native number and arrangement",
+                "identity-defining colors",
                 "no magenta",
                 "no text",
                 "1 row of 8",
             ):
                 self.assertIn(phrase, prompts.lower())
+            for forbidden in (
+                "black cat",
+                "four total cat legs",
+                "black nose",
+                "golden eyes",
+            ):
+                self.assertNotIn(forbidden, prompts.lower())
 
     def test_prepare_accepts_legacy_16_frame_schema_without_hardcoding_it(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            reference = root / "shadow.png"
+            reference = root / "nova.png"
             schema = root / "legacy-schema.json"
             run_dir = root / "run"
             make_reference(reference)
@@ -186,8 +226,8 @@ class CompanionPetAssetsTests(unittest.TestCase):
 
             self.module.prepare_run(
                 run_dir=run_dir,
-                pet_id="shadow",
-                display_name="Shadow",
+                pet_id="nova",
+                display_name="Nova",
                 references=[reference],
                 states=["thinking"],
                 force=False,
@@ -206,7 +246,7 @@ class CompanionPetAssetsTests(unittest.TestCase):
     def test_six_frame_state_pads_runtime_row_to_eight_columns(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            reference = root / "shadow.png"
+            reference = root / "nova.png"
             source = root / "thinking-source.png"
             schema = root / "schema.json"
             run_dir = root / "run"
@@ -228,8 +268,8 @@ class CompanionPetAssetsTests(unittest.TestCase):
             )
             self.module.prepare_run(
                 run_dir,
-                "shadow",
-                "Shadow",
+                "nova",
+                "Nova",
                 [reference],
                 ["thinking"],
                 False,
@@ -246,11 +286,11 @@ class CompanionPetAssetsTests(unittest.TestCase):
 
     def test_inspect_pet_reports_legacy_package_migration_to_current_schema(self):
         with tempfile.TemporaryDirectory() as temporary:
-            pet_dir = Path(temporary) / "legacy-shadow"
+            pet_dir = Path(temporary) / "legacy-nova"
             pet_dir.mkdir()
             manifest = {
-                "id": "legacy-shadow",
-                "displayName": "Legacy Shadow",
+                "id": "legacy-nova",
+                "displayName": "Legacy Nova",
                 "spritesheetPath": "spritesheet.webp",
                 "spriteColumns": 32,
                 "spriteRows": 10,
@@ -285,16 +325,121 @@ class CompanionPetAssetsTests(unittest.TestCase):
             self.assertIn("goal-complete", report["source"]["animationFrameCounts"])
             self.assertEqual(report["recommendedReference"], "spritesheet.webp")
 
+    def test_prepare_conversion_derives_installable_companion_contract_without_mutating_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "native-cat"
+            run_dir = root / "run"
+            manifest_path, sheet_path = make_native_pet(source)
+            source_hashes = (sha256(manifest_path), sha256(sheet_path))
+
+            result = self.module.prepare_conversion_run(
+                run_dir=run_dir,
+                source_pet_dir=source,
+                output_pet_id="native-cat-companion",
+                force=False,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(source_hashes, (sha256(manifest_path), sha256(sheet_path)))
+            request = json.loads((run_dir / "request.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                request["candidateStates"],
+                ["goal-complete", "thinking", "talking"],
+            )
+            self.assertEqual(request["companionRuntime"]["columns"], 8)
+            self.assertEqual(request["companionRuntime"]["rows"], 12)
+            self.assertTrue(request["candidateRuntimeInstallable"])
+            self.assertEqual(request["conversionSource"]["petID"], "native-cat")
+            self.assertEqual(request["conversionSource"]["manifestSha256"], source_hashes[0])
+            self.assertEqual(request["conversionSource"]["spritesheetSha256"], source_hashes[1])
+            self.assertTrue((run_dir / "references" / "source-pet.json").is_file())
+            copied_sheet = run_dir / request["conversionSource"]["referencePath"]
+            self.assertTrue(copied_sheet.is_file())
+            self.assertEqual(sha256(copied_sheet), source_hashes[1])
+
+    def test_package_conversion_preserves_native_look_sheet_and_adds_companion_rows(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "native-cat"
+            run_dir = root / "run"
+            output = root / "native-cat-companion"
+            manifest_path, sheet_path = make_native_pet(source)
+            source_hashes = (sha256(manifest_path), sha256(sheet_path))
+            self.module.prepare_conversion_run(
+                run_dir=run_dir,
+                source_pet_dir=source,
+                output_pet_id="native-cat-companion",
+                force=False,
+            )
+            for state in ("goal-complete", "thinking", "talking"):
+                generated = root / f"{state}.png"
+                make_grid_source(generated)
+                self.module.ingest_state(
+                    run_dir,
+                    state,
+                    generated,
+                    8,
+                    1,
+                    (0, 255, 255),
+                    8,
+                )
+            review_path = self.module.create_review_template(run_dir)
+            approve_review(review_path)
+
+            result = self.module.package_companion_pet(
+                run_dir=run_dir,
+                source_pet_dir=source,
+                output_dir=output,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(source_hashes, (sha256(manifest_path), sha256(sheet_path)))
+            manifest = json.loads((output / "pet.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["id"], "native-cat-companion")
+            self.assertEqual(manifest["spriteColumns"], 8)
+            self.assertEqual(manifest["spriteRows"], 12)
+            self.assertEqual(manifest["lookSpritesheetPath"], "look-spritesheet.webp")
+            self.assertEqual(manifest["lookSpriteColumns"], 8)
+            self.assertEqual(manifest["lookSpriteRows"], 11)
+            self.assertEqual(manifest["lookFrameStartRow"], 9)
+            self.assertEqual(manifest["animationFrameCounts"]["thinking"], 8)
+            self.assertEqual(manifest["animationFrameCounts"]["talking"], 8)
+            self.assertEqual(manifest["animationFrameCounts"]["goal-complete"], 8)
+            self.assertEqual(sha256(output / "look-spritesheet.webp"), sha256(sheet_path))
+
+            with Image.open(sheet_path) as native, Image.open(output / "spritesheet.webp") as companion:
+                native = native.convert("RGBA")
+                companion = companion.convert("RGBA")
+                self.assertEqual(companion.size, (8 * 192, 12 * 208))
+                self.assertEqual(
+                    companion.crop((0, 0, companion.width, 9 * 208)).tobytes(),
+                    native.crop((0, 0, native.width, 9 * 208)).tobytes(),
+                )
+                for index, state in enumerate(("goal-complete", "thinking", "talking"), start=9):
+                    with Image.open(run_dir / "rows" / f"{state}.png") as row:
+                        self.assertEqual(
+                            companion.crop((0, index * 208, companion.width, (index + 1) * 208)).tobytes(),
+                            row.convert("RGBA").tobytes(),
+                        )
+
+            with self.assertRaises(FileExistsError):
+                self.module.package_companion_pet(
+                    run_dir=run_dir,
+                    source_pet_dir=source,
+                    output_dir=output,
+                )
+
     def test_ingest_uses_one_global_scale_binary_alpha_and_stable_baseline(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            reference = root / "shadow.png"
+            reference = root / "nova.png"
             source = root / "thinking-source.png"
             run_dir = root / "run"
             make_reference(reference)
             make_grid_source(source)
             self.module.prepare_run(
-                run_dir, "shadow", "Shadow", [reference], ["thinking"], False
+                run_dir, "nova", "Nova", [reference], ["thinking"], False
             )
 
             result = self.module.ingest_state(
@@ -325,16 +470,16 @@ class CompanionPetAssetsTests(unittest.TestCase):
             self.assertEqual(provenance["resampling"], "nearest-neighbor")
             self.assertEqual(provenance["sourceSha256"], sha256(source))
 
-    def test_review_gate_rejects_wrong_leg_count_and_pixel_contamination(self):
+    def test_review_gate_rejects_bad_anatomy_and_pixel_contamination(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            reference = root / "shadow.png"
+            reference = root / "nova.png"
             source = root / "thinking-source.png"
             run_dir = root / "run"
             make_reference(reference)
             make_grid_source(source)
             self.module.prepare_run(
-                run_dir, "shadow", "Shadow", [reference], ["thinking"], False
+                run_dir, "nova", "Nova", [reference], ["thinking"], False
             )
             self.module.ingest_state(
                 run_dir, "thinking", source, 8, 1, (0, 255, 255), 8
@@ -343,14 +488,20 @@ class CompanionPetAssetsTests(unittest.TestCase):
             approve_review(review_path)
 
             review = json.loads(review_path.read_text(encoding="utf-8"))
-            review["states"][0]["frames"][3]["legCount"] = 5
+            review["states"][0]["frames"][3]["anatomyCorrect"] = False
             review_path.write_text(
                 json.dumps(review, indent=2, sort_keys=True) + "\n", encoding="utf-8"
             )
             report = self.module.validate_run(run_dir, require_review=True)
-            self.assertIn("thinking:03:leg_count_must_equal_4", report["errors"])
+            self.assertIn(
+                "thinking:03:review_anatomyCorrect_must_be_true",
+                report["errors"],
+            )
 
-            review["states"][0]["frames"][3]["legCount"] = 4
+            review["states"][0]["frames"][3]["anatomyCorrect"] = True
+            review_path.write_text(
+                json.dumps(review, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
             frame_path = run_dir / "frames" / "thinking" / "03.png"
             with Image.open(frame_path) as opened:
                 frame = opened.convert("RGBA")
@@ -363,13 +514,13 @@ class CompanionPetAssetsTests(unittest.TestCase):
     def test_preview_outputs_are_byte_deterministic_and_nearest_scaled(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            reference = root / "shadow.png"
+            reference = root / "nova.png"
             source = root / "talking-source.png"
             run_dir = root / "run"
             make_reference(reference)
             make_grid_source(source)
             self.module.prepare_run(
-                run_dir, "shadow", "Shadow", [reference], ["talking"], False
+                run_dir, "nova", "Nova", [reference], ["talking"], False
             )
             self.module.ingest_state(
                 run_dir, "talking", source, 8, 1, (0, 255, 255), 8
@@ -395,13 +546,13 @@ class CompanionPetAssetsTests(unittest.TestCase):
     def test_validation_rejects_row_that_does_not_match_frames(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            reference = root / "shadow.png"
+            reference = root / "nova.png"
             source = root / "thinking-source.png"
             run_dir = root / "run"
             make_reference(reference)
             make_grid_source(source)
             self.module.prepare_run(
-                run_dir, "shadow", "Shadow", [reference], ["thinking"], False
+                run_dir, "nova", "Nova", [reference], ["thinking"], False
             )
             self.module.ingest_state(
                 run_dir, "thinking", source, 8, 1, (0, 255, 255), 8

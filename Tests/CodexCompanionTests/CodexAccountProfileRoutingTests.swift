@@ -614,7 +614,7 @@ struct CodexAccountProfileRoutingTests {
     }
 
     @Test
-    func boundThreadUsesItsProfileTransportWithoutTouchingNativeIPC() async {
+    func boundLoadedThreadUsesNativeIPCWithoutTouchingProfileTransport() async {
         let profile = CodexAccountProfile(id: UUID(), label: "Main")
         let nativeAttempts = ProfileRoutingSendRecorder()
         let profileAttempts = ProfileRoutingSendRecorder()
@@ -667,14 +667,117 @@ struct CodexAccountProfileRoutingTests {
         )
 
         #expect(outcome == .sent)
-        #expect(await nativeAttempts.count == 0)
+        #expect(await nativeAttempts.count == 1)
+        #expect(await profileAttempts.count == 0)
+        #expect(await verifications.profileIDs.isEmpty)
+    }
+
+    @Test
+    func boundUnloadedThreadFallsBackToItsVerifiedProfileTransport() async {
+        let profile = CodexAccountProfile(id: UUID(), label: "Main")
+        let nativeAttempts = ProfileRoutingSendRecorder()
+        let profileAttempts = ProfileRoutingSendRecorder()
+        let verifications = ProfileRuntimeVerificationRecorder(result: true)
+        let sender = CodexAppServerSender(
+            submitter: { prompt, threadID, action, clientMessageID, cwd, attachments in
+                await nativeAttempts.record(
+                    profile: nil,
+                    prompt: prompt,
+                    threadID: threadID,
+                    action: action,
+                    clientMessageID: clientMessageID,
+                    cwd: cwd,
+                    attachments: attachments
+                )
+                return .threadNotLoaded
+            },
+            profileResolver: { threadID in
+                threadID == "thread-profile" ? profile : nil
+            },
+            profileVerifier: { verifiedProfile in
+                await verifications.verify(verifiedProfile)
+            },
+            profileSubmitter: {
+                selectedProfile, prompt, threadID, cwd, action, expectedTurnID,
+                clientMessageID, queuedNotification, attachments in
+                _ = expectedTurnID
+                _ = queuedNotification
+                await profileAttempts.record(
+                    profile: selectedProfile,
+                    prompt: prompt,
+                    threadID: threadID,
+                    action: action,
+                    clientMessageID: clientMessageID,
+                    cwd: cwd,
+                    attachments: attachments
+                )
+                return .sent
+            }
+        )
+
+        let outcome = await sender.submit(
+            prompt: "Continue with this account",
+            threadID: "thread-profile",
+            cwd: "/tmp/project",
+            action: .steer,
+            expectedTurnID: "turn-live",
+            clientMessageID: "message-profile-fallback",
+            onQueued: {}
+        )
+
+        #expect(outcome == .sent)
+        #expect(await nativeAttempts.count == 1)
         #expect(await profileAttempts.count == 1)
         #expect(await profileAttempts.profileIDs == [profile.id])
         #expect(await verifications.profileIDs == [profile.id])
     }
 
     @Test
-    func boundThreadRejectsAMismatchedRuntimeBeforeSubmittingThePrompt() async {
+    func canonicalThreadRoutesRepliesToItsActivePhysicalFork() async {
+        let profile = CodexAccountProfile(id: UUID(), label: "Backup")
+        let profileAttempts = ProfileRoutingSendRecorder()
+        let sender = CodexAppServerSender(
+            profileResolver: { threadID in
+                threadID == "physical-fork" ? profile : nil
+            },
+            profileVerifier: { _ in true },
+            profileSubmitter: {
+                selectedProfile, prompt, threadID, cwd, action, expectedTurnID,
+                clientMessageID, queuedNotification, attachments in
+                _ = expectedTurnID
+                _ = queuedNotification
+                await profileAttempts.record(
+                    profile: selectedProfile,
+                    prompt: prompt,
+                    threadID: threadID,
+                    action: action,
+                    clientMessageID: clientMessageID,
+                    cwd: cwd,
+                    attachments: attachments
+                )
+                return .sent
+            },
+            runtimeThreadResolver: { threadID in
+                threadID == "canonical-thread" ? "physical-fork" : threadID
+            }
+        )
+
+        let outcome = await sender.submit(
+            prompt: "Continue the same task",
+            threadID: "canonical-thread",
+            cwd: "/tmp/project",
+            action: .steer,
+            expectedTurnID: "turn-live",
+            clientMessageID: "message-lineage",
+            onQueued: {}
+        )
+
+        #expect(outcome == .sent)
+        #expect(await profileAttempts.threadIDs == ["physical-fork"])
+    }
+
+    @Test
+    func boundUnloadedThreadRejectsAMismatchedProfileRuntimeBeforeFallback() async {
         let profile = CodexAccountProfile(id: UUID(), label: "Backup")
         let nativeAttempts = ProfileRoutingSendRecorder()
         let profileAttempts = ProfileRoutingSendRecorder()
@@ -690,7 +793,7 @@ struct CodexAccountProfileRoutingTests {
                     cwd: cwd,
                     attachments: attachments
                 )
-                return .sent
+                return .threadNotLoaded
             },
             profileResolver: { _ in profile },
             profileVerifier: { verifiedProfile in
@@ -726,7 +829,7 @@ struct CodexAccountProfileRoutingTests {
 
         #expect(outcome == .failed)
         #expect(await verifications.profileIDs == [profile.id])
-        #expect(await nativeAttempts.count == 0)
+        #expect(await nativeAttempts.count == 1)
         #expect(await profileAttempts.count == 0)
     }
 
@@ -980,6 +1083,7 @@ struct CodexAccountProfileRoutingTests {
 private actor ProfileRoutingSendRecorder {
     private(set) var count = 0
     private(set) var profileIDs: [UUID] = []
+    private(set) var threadIDs: [String] = []
 
     func record(
         profile: CodexAccountProfile?,
@@ -991,12 +1095,12 @@ private actor ProfileRoutingSendRecorder {
         attachments: [CodexFollowerAttachment]
     ) {
         _ = prompt
-        _ = threadID
         _ = action
         _ = clientMessageID
         _ = cwd
         _ = attachments
         count += 1
+        threadIDs.append(threadID)
         if let profile {
             profileIDs.append(profile.id)
         }

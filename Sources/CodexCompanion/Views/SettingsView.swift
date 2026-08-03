@@ -3,6 +3,7 @@ import SwiftUI
 
 enum CompanionSettingsTab: String, CaseIterable, Identifiable {
     case general
+    case accounts
     case chat
     case mobile
     case updates
@@ -12,6 +13,7 @@ enum CompanionSettingsTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .general: "General"
+        case .accounts: "Accounts"
         case .chat: "Chat"
         case .mobile: "Mobile"
         case .updates: "Updates"
@@ -21,6 +23,7 @@ enum CompanionSettingsTab: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .general: "slider.horizontal.3"
+        case .accounts: "person.2"
         case .chat: "bubble.left.and.bubble.right"
         case .mobile: "iphone"
         case .updates: "arrow.triangle.2.circlepath"
@@ -45,6 +48,10 @@ struct SettingsView: View {
             generalSettings
                 .tabItem { Label(CompanionSettingsTab.general.title, systemImage: CompanionSettingsTab.general.systemImage) }
                 .tag(CompanionSettingsTab.general)
+
+            accountSettings
+                .tabItem { Label(CompanionSettingsTab.accounts.title, systemImage: CompanionSettingsTab.accounts.systemImage) }
+                .tag(CompanionSettingsTab.accounts)
 
             chatSettings
                 .tabItem { Label(CompanionSettingsTab.chat.title, systemImage: CompanionSettingsTab.chat.systemImage) }
@@ -127,6 +134,12 @@ struct SettingsView: View {
                 }
             }
 
+        }
+        .formStyle(.grouped)
+    }
+
+    private var accountSettings: some View {
+        Form {
             CodexAccountProfileSettingsSection(
                 automaticallyContinuesGoalsAcrossAccounts:
                     $model.automaticallyContinuesGoalsAcrossAccounts,

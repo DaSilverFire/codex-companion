@@ -6,16 +6,41 @@ import PDFKit
 import FoundationModels
 #endif
 
-protocol OnDeviceChatServing: Sendable {
+protocol OnDeviceChatServing: CompanionChatStreaming {
     func prewarm() async
     func send(prompt: String) async throws -> String
     func send(
         prompt: String,
         attachments: [CompanionBridgeAttachment]
     ) async throws -> String
+    func stream(
+        prompt: String,
+        attachments: [CompanionBridgeAttachment],
+        authorizationMode: OnDeviceChatAuthorizationMode
+    ) -> AsyncThrowingStream<CompanionChatStreamEvent, Error>
+}
+
+enum OnDeviceChatAuthorizationMode: Equatable, Sendable {
+    case interactiveMac
+    case remoteClient
+
+    var allowsSystemAuthorizationPrompt: Bool {
+        self == .interactiveMac
+    }
 }
 
 extension OnDeviceChatServing {
+    func stream(
+        prompt: String,
+        attachments: [CompanionBridgeAttachment]
+    ) -> AsyncThrowingStream<CompanionChatStreamEvent, Error> {
+        CompanionChatFinalResponseStream.make {
+            CompanionChatStreamCompletion(
+                text: try await send(prompt: prompt, attachments: attachments)
+            )
+        }
+    }
+
     func send(
         prompt: String,
         attachments: [CompanionBridgeAttachment]
@@ -24,6 +49,14 @@ extension OnDeviceChatServing {
             throw OnDeviceChatError.attachmentsUnavailable
         }
         return try await send(prompt: prompt)
+    }
+
+    func stream(
+        prompt: String,
+        attachments: [CompanionBridgeAttachment],
+        authorizationMode: OnDeviceChatAuthorizationMode
+    ) -> AsyncThrowingStream<CompanionChatStreamEvent, Error> {
+        stream(prompt: prompt, attachments: attachments)
     }
 }
 
@@ -50,6 +83,41 @@ enum OnDeviceChatError: LocalizedError {
         case .invalidImage(let filename):
             return "\(filename) could not be decoded as an image."
         }
+    }
+}
+
+enum OnDeviceChatFailurePolicy {
+    static let authorizationRequiredCode = "on_device_authorization_required"
+    static let unavailableCode = "on_device_chat_unavailable"
+
+    static func bridgePresentation(
+        for error: Error
+    ) -> (code: String, message: String) {
+        let underlying = underlyingError(from: error)
+        if let contextError = underlying as? CompanionPersonalContextError {
+            switch contextError {
+            case .calendarAuthorizationRequired,
+                 .remindersAuthorizationRequired,
+                 .locationAuthorizationRequired:
+                return (
+                    authorizationRequiredCode,
+                    contextError.localizedDescription
+                )
+            default:
+                break
+            }
+        }
+        return (unavailableCode, underlying.localizedDescription)
+    }
+
+    private static func underlyingError(from error: Error) -> Error {
+        #if canImport(FoundationModels)
+        if #available(macOS 26.0, *),
+           let toolCallError = error as? LanguageModelSession.ToolCallError {
+            return underlyingError(from: toolCallError.underlyingError)
+        }
+        #endif
+        return error
     }
 }
 
@@ -93,9 +161,6 @@ struct OnDeviceChatAttachmentContext: Equatable, Sendable {
             case .image:
                 images.append(attachment)
             case .file:
-                guard let extracted = extractText(from: attachment) else {
-                    throw OnDeviceChatError.unsupportedAttachment(attachment.filename)
-                }
                 guard remainingCharacters > 0 else {
                     documentSections.append(
                         "File: \(attachment.filename)\n---\n[Attachment omitted because the document context limit was reached]\n---"
@@ -103,6 +168,12 @@ struct OnDeviceChatAttachmentContext: Equatable, Sendable {
                     continue
                 }
                 let characterLimit = min(maximumCharactersPerDocument, remainingCharacters)
+                guard let extracted = extractText(
+                    from: attachment,
+                    maximumCharacters: characterLimit + 1
+                ) else {
+                    throw OnDeviceChatError.unsupportedAttachment(attachment.filename)
+                }
                 let content = String(extracted.prefix(characterLimit))
                 remainingCharacters -= content.count
                 let suffix = extracted.count > content.count ? "\n[Attachment truncated]" : ""
@@ -131,19 +202,27 @@ struct OnDeviceChatAttachmentContext: Equatable, Sendable {
         )
     }
 
-    private static func extractText(from attachment: CompanionBridgeAttachment) -> String? {
+    private static func extractText(
+        from attachment: CompanionBridgeAttachment,
+        maximumCharacters: Int
+    ) -> String? {
         let pathExtension = (attachment.filename as NSString)
             .pathExtension
             .lowercased()
         let mimeType = attachment.mimeType?.lowercased() ?? ""
         if mimeType == "application/pdf" || pathExtension == "pdf" {
-            guard let document = PDFDocument(data: attachment.data) else { return nil }
-            let pages = (0 ..< document.pageCount).compactMap { index in
-                document.page(at: index)?.string
+            let document = attachment.localFileURL.flatMap(PDFDocument.init(url:))
+                ?? PDFDocument(data: attachment.data)
+            guard let document else { return nil }
+            var text = ""
+            for index in 0 ..< document.pageCount where text.count < maximumCharacters {
+                guard let page = document.page(at: index)?.string else { continue }
+                if !text.isEmpty { text.append("\n\n") }
+                text.append(page)
             }
-            let text = pages.joined(separator: "\n\n")
+            let limited = String(text.prefix(maximumCharacters))
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            return text.isEmpty ? nil : text
+            return limited.isEmpty ? nil : limited
         }
 
         let textExtensions: Set<String> = [
@@ -154,13 +233,22 @@ struct OnDeviceChatAttachmentContext: Equatable, Sendable {
         guard mimeType.hasPrefix("text/")
                 || mimeType == "application/json"
                 || mimeType == "application/xml"
-                || textExtensions.contains(pathExtension),
-              let text = String(data: attachment.data, encoding: .utf8)
+                || textExtensions.contains(pathExtension)
         else {
             return nil
         }
+        let maximumBytes = max(4_096, maximumCharacters * 4 + 4)
+        let data: Data
+        if let localFileURL = attachment.localFileURL {
+            guard let handle = try? FileHandle(forReadingFrom: localFileURL) else { return nil }
+            defer { try? handle.close() }
+            data = (try? handle.read(upToCount: maximumBytes)) ?? Data()
+        } else {
+            data = Data(attachment.data.prefix(maximumBytes))
+        }
+        let text = String(decoding: data, as: UTF8.self)
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        return trimmed.isEmpty ? nil : String(trimmed.prefix(maximumCharacters))
     }
 }
 
@@ -442,6 +530,7 @@ private struct CompanionWeatherTool: Tool {
 private struct CompanionCurrentLocationTool: Tool {
     let name = "current_location"
     let description = "Privately get this Mac's current coordinates and location accuracy. Use only when the user's request depends on their current location."
+    let allowsSystemAuthorizationPrompt: Bool
 
     @Generable
     struct Arguments {
@@ -450,7 +539,9 @@ private struct CompanionCurrentLocationTool: Tool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let snapshot = try await CompanionLocationService().currentLocation()
+        let snapshot = try await CompanionLocationService().currentLocation(
+            allowsSystemAuthorizationPrompt: allowsSystemAuthorizationPrompt
+        )
         return snapshot.toolSummary()
     }
 }
@@ -459,6 +550,7 @@ private struct CompanionCurrentLocationTool: Tool {
 private struct CompanionCurrentLocationWeatherTool: Tool {
     let name = "current_weather_here"
     let description = "Get live weather and today's forecast at this Mac's current location."
+    let allowsSystemAuthorizationPrompt: Bool
 
     @Generable
     struct Arguments {
@@ -467,7 +559,9 @@ private struct CompanionCurrentLocationWeatherTool: Tool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let snapshot = try await CompanionLocationService().currentLocation()
+        let snapshot = try await CompanionLocationService().currentLocation(
+            allowsSystemAuthorizationPrompt: allowsSystemAuthorizationPrompt
+        )
         let report = try await CompanionWeatherService().currentWeather(at: snapshot.weatherLocation)
         return report.toolSummary
     }
@@ -477,6 +571,7 @@ private struct CompanionCurrentLocationWeatherTool: Tool {
 private struct CompanionCalendarAgendaTool: Tool {
     let name = "calendar_agenda"
     let description = "Read upcoming events from the user's Apple calendars. This tool cannot create, edit, or delete events."
+    let allowsSystemAuthorizationPrompt: Bool
 
     @Generable
     struct Arguments {
@@ -490,7 +585,8 @@ private struct CompanionCalendarAgendaTool: Tool {
     func call(arguments: Arguments) async throws -> String {
         let events = try await CompanionEventKitService.shared.upcomingEvents(
             hoursAhead: min(max(arguments.hoursAhead, 1), 336),
-            maximumItems: min(max(arguments.maximumItems, 1), 25)
+            maximumItems: min(max(arguments.maximumItems, 1), 25),
+            allowsSystemAuthorizationPrompt: allowsSystemAuthorizationPrompt
         )
         return CompanionPersonalContextFormatter.agendaSummary(events: events)
     }
@@ -500,6 +596,7 @@ private struct CompanionCalendarAgendaTool: Tool {
 private struct CompanionIncompleteRemindersTool: Tool {
     let name = "incomplete_reminders"
     let description = "Read incomplete items from the user's Apple Reminders lists. This tool cannot create, edit, complete, or delete reminders."
+    let allowsSystemAuthorizationPrompt: Bool
 
     @Generable
     struct Arguments {
@@ -509,7 +606,8 @@ private struct CompanionIncompleteRemindersTool: Tool {
 
     func call(arguments: Arguments) async throws -> String {
         let reminders = try await CompanionEventKitService.shared.incompleteReminders(
-            maximumItems: min(max(arguments.maximumItems, 1), 25)
+            maximumItems: min(max(arguments.maximumItems, 1), 25),
+            allowsSystemAuthorizationPrompt: allowsSystemAuthorizationPrompt
         )
         return CompanionPersonalContextFormatter.reminderSummary(reminders: reminders)
     }
@@ -568,12 +666,12 @@ actor AppleOnDeviceChatService: OnDeviceChatServing {
     private static let sessionGenerationLimit = 8
 
     private var session: LanguageModelSession?
+    private var sessionAuthorizationMode: OnDeviceChatAuthorizationMode?
     private var successfulGenerationCount = 0
 
     func prewarm() async {
         guard SystemLanguageModel.default.availability == .available else { return }
-        let activeSession = session ?? makeSession()
-        session = activeSession
+        let activeSession = session(for: .interactiveMac)
         activeSession.prewarm()
     }
 
@@ -585,49 +683,112 @@ actor AppleOnDeviceChatService: OnDeviceChatServing {
         prompt: String,
         attachments: [CompanionBridgeAttachment]
     ) async throws -> String {
-        guard SystemLanguageModel.default.availability == .available else {
-            throw OnDeviceChatError.unavailable
-        }
-
-        let context = try OnDeviceChatAttachmentContext.prepare(
-            prompt: prompt,
-            attachments: attachments
+        let completion = try await CompanionChatStreamCollector.collect(
+            stream(prompt: prompt, attachments: attachments)
         )
-        let activeSession = session ?? makeSession()
-        session = activeSession
-        guard !activeSession.isResponding else {
-            throw OnDeviceChatError.busy
+        return completion.text
+    }
+
+    nonisolated func stream(
+        prompt: String,
+        attachments: [CompanionBridgeAttachment]
+    ) -> AsyncThrowingStream<CompanionChatStreamEvent, Error> {
+        stream(
+            prompt: prompt,
+            attachments: attachments,
+            authorizationMode: .interactiveMac
+        )
+    }
+
+    nonisolated func stream(
+        prompt: String,
+        attachments: [CompanionBridgeAttachment],
+        authorizationMode: OnDeviceChatAuthorizationMode
+    ) -> AsyncThrowingStream<CompanionChatStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task { [weak self] in
+                guard let self else {
+                    continuation.finish(throwing: OnDeviceChatError.unavailable)
+                    return
+                }
+                await self.generate(
+                    prompt: prompt,
+                    attachments: attachments,
+                    authorizationMode: authorizationMode,
+                    continuation: continuation
+                )
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func generate(
+        prompt: String,
+        attachments: [CompanionBridgeAttachment],
+        authorizationMode: OnDeviceChatAuthorizationMode,
+        continuation: AsyncThrowingStream<CompanionChatStreamEvent, Error>.Continuation
+    ) async {
+        guard SystemLanguageModel.default.availability == .available else {
+            continuation.finish(throwing: OnDeviceChatError.unavailable)
+            return
         }
 
         do {
-            let responseText: String
+            let context = try OnDeviceChatAttachmentContext.prepare(
+                prompt: prompt,
+                attachments: attachments
+            )
+            let activeSession = session(for: authorizationMode)
+            guard !activeSession.isResponding else {
+                throw OnDeviceChatError.busy
+            }
+
+            continuation.yield(.started)
+            var accumulator = CompanionCumulativeTextAccumulator()
             if context.images.isEmpty {
-                let response = try await activeSession.respond(
+                let responseStream = activeSession.streamResponse(
                     to: context.prompt,
                     options: Self.options
                 )
-                responseText = response.content
+                for try await snapshot in responseStream {
+                    let delta = accumulator.delta(for: snapshot.content)
+                    if !delta.isEmpty {
+                        continuation.yield(.assistantDelta(delta))
+                    }
+                }
             } else if #available(macOS 27.0, *) {
                 let images = try Self.modelImages(from: context.images)
-                let response = try await activeSession.respond(options: Self.options) {
+                let responseStream = activeSession.streamResponse(options: Self.options) {
                     context.prompt
                     images
                 }
-                responseText = response.content
+                for try await snapshot in responseStream {
+                    let delta = accumulator.delta(for: snapshot.content)
+                    if !delta.isEmpty {
+                        continuation.yield(.assistantDelta(delta))
+                    }
+                }
             } else {
                 throw OnDeviceChatError.attachmentsUnavailable
             }
-            let text = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = accumulator.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else {
                 throw OnDeviceChatError.emptyResponse
             }
             recordSuccessfulGeneration(using: activeSession)
-            return text
+            continuation.yield(.completed(.init(text: text)))
+            continuation.finish()
         } catch let error as LanguageModelSession.GenerationError {
-            if case .exceededContextWindowSize = error {
-                replaceAndPrewarmSession(ifCurrent: activeSession)
+            if case .exceededContextWindowSize = error,
+               let activeSession = session {
+                replaceAndPrewarmSession(
+                    ifCurrent: activeSession,
+                    authorizationMode: authorizationMode
+                )
             }
-            throw error
+            continuation.finish(throwing: error)
+        } catch {
+            continuation.finish(throwing: error)
         }
     }
 
@@ -636,7 +797,10 @@ actor AppleOnDeviceChatService: OnDeviceChatServing {
         from attachments: [CompanionBridgeAttachment]
     ) throws -> [FoundationModels.Attachment<FoundationModels.ImageAttachmentContent>] {
         try attachments.map { attachment in
-            guard let source = CGImageSourceCreateWithData(attachment.data as CFData, nil),
+            let source = attachment.localFileURL.flatMap {
+                CGImageSourceCreateWithURL($0 as CFURL, nil)
+            } ?? CGImageSourceCreateWithData(attachment.data as CFData, nil)
+            guard let source,
                   let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
             else {
                 throw OnDeviceChatError.invalidImage(attachment.filename)
@@ -646,15 +810,40 @@ actor AppleOnDeviceChatService: OnDeviceChatServing {
         }
     }
 
-    private func makeSession() -> LanguageModelSession {
+    private func session(
+        for authorizationMode: OnDeviceChatAuthorizationMode
+    ) -> LanguageModelSession {
+        if let session, sessionAuthorizationMode == authorizationMode {
+            return session
+        }
+        let replacement = makeSession(authorizationMode: authorizationMode)
+        session = replacement
+        sessionAuthorizationMode = authorizationMode
+        successfulGenerationCount = 0
+        return replacement
+    }
+
+    private func makeSession(
+        authorizationMode: OnDeviceChatAuthorizationMode
+    ) -> LanguageModelSession {
+        let allowsSystemAuthorizationPrompt =
+            authorizationMode.allowsSystemAuthorizationPrompt
         let tools: [any Tool] = [
             CompanionCalculatorTool(),
             CompanionCurrentContextTool(),
             CompanionWeatherTool(),
-            CompanionCurrentLocationTool(),
-            CompanionCurrentLocationWeatherTool(),
-            CompanionCalendarAgendaTool(),
-            CompanionIncompleteRemindersTool(),
+            CompanionCurrentLocationTool(
+                allowsSystemAuthorizationPrompt: allowsSystemAuthorizationPrompt
+            ),
+            CompanionCurrentLocationWeatherTool(
+                allowsSystemAuthorizationPrompt: allowsSystemAuthorizationPrompt
+            ),
+            CompanionCalendarAgendaTool(
+                allowsSystemAuthorizationPrompt: allowsSystemAuthorizationPrompt
+            ),
+            CompanionIncompleteRemindersTool(
+                allowsSystemAuthorizationPrompt: allowsSystemAuthorizationPrompt
+            ),
             CompanionWebReferenceSearchTool(),
         ]
         return LanguageModelSession(
@@ -667,14 +856,23 @@ actor AppleOnDeviceChatService: OnDeviceChatServing {
         guard session === completedSession else { return }
         successfulGenerationCount += 1
         if successfulGenerationCount >= Self.sessionGenerationLimit {
-            replaceAndPrewarmSession(ifCurrent: completedSession)
+            replaceAndPrewarmSession(
+                ifCurrent: completedSession,
+                authorizationMode: sessionAuthorizationMode ?? .interactiveMac
+            )
         }
     }
 
-    private func replaceAndPrewarmSession(ifCurrent expectedSession: LanguageModelSession) {
-        guard session === expectedSession else { return }
-        let replacement = makeSession()
+    private func replaceAndPrewarmSession(
+        ifCurrent expectedSession: LanguageModelSession,
+        authorizationMode: OnDeviceChatAuthorizationMode
+    ) {
+        guard session === expectedSession,
+              sessionAuthorizationMode == authorizationMode
+        else { return }
+        let replacement = makeSession(authorizationMode: authorizationMode)
         session = replacement
+        sessionAuthorizationMode = authorizationMode
         successfulGenerationCount = 0
         replacement.prewarm()
     }

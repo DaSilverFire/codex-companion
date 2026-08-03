@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import os
+import plistlib
 import shutil
 import subprocess
 import tempfile
@@ -38,7 +40,7 @@ def plugin_fixture_is_available():
 
 
 def test_release_candidate_uses_one_non_colliding_version_source():
-    assert VERSION_FILE.read_text().strip() == "0.3.4"
+    assert VERSION_FILE.read_text().strip() == "0.3.5"
 
     build_source = BUILD_SCRIPT.read_text()
     release_source = RELEASE_SCRIPT.read_text()
@@ -76,12 +78,16 @@ def test_build_uses_silverfire_namespace_and_never_activates_shared_server():
 
 
 def test_builds_embed_only_an_explicit_secure_relay_endpoint():
-    for script in [BUILD_SCRIPT, RELEASE_SCRIPT]:
-        source = script.read_text()
-        assert 'RELAY_URL="${CODEX_COMPANION_RELAY_URL:-}"' in source
-        assert "CodexCompanionRelayURL" in source
-        assert "relay URL must use WSS" in source
-        assert "wss://" in source
+    build_source = BUILD_SCRIPT.read_text()
+    assert "CodexCompanionRelayURL" in build_source
+    assert "relay URL must use WSS" in build_source
+    assert "wss://" in build_source
+
+    release_source = RELEASE_SCRIPT.read_text()
+    assert 'RELAY_URL="${CODEX_COMPANION_RELAY_URL:-}"' in release_source
+    assert "CodexCompanionRelayURL" in release_source
+    assert "relay URL must use WSS" in release_source
+    assert "wss://" in release_source
 
     release_guide = RELEASING_GUIDE.read_text()
     assert 'CODEX_COMPANION_RELAY_URL="wss://' in release_guide
@@ -89,20 +95,78 @@ def test_builds_embed_only_an_explicit_secure_relay_endpoint():
 
 
 def test_mobile_beta_is_unavailable_in_public_builds_unless_explicitly_authorized():
-    for script in [BUILD_SCRIPT, RELEASE_SCRIPT]:
-        source = script.read_text()
-        assert 'MOBILE_BETA_AUTHORIZED="${CODEX_COMPANION_MOBILE_BETA_AUTHORIZED:-0}"' in source
-        assert "CODEX_COMPANION_MOBILE_BETA_AUTHORIZED must be 0 or 1" in source
-        assert "CodexCompanionMobileBetaAuthorized" in source
-        assert 'if [[ "$MOBILE_BETA_AUTHORIZED" == "1" ]]; then' in source
-        assert "NSBonjourServices" in source
-        assert "NSLocalNetworkUsageDescription" in source
+    build_source = BUILD_SCRIPT.read_text()
+    assert "CODEX_COMPANION_MOBILE_BETA_AUTHORIZED must be 0 or 1" in build_source
+    assert "CodexCompanionMobileBetaAuthorized" in build_source
+    assert 'if [[ "$MOBILE_BETA_AUTHORIZED" == "1" ]]; then' in build_source
+    assert "NSBonjourServices" in build_source
+    assert "NSLocalNetworkUsageDescription" in build_source
+
+    release_source = RELEASE_SCRIPT.read_text()
+    assert 'MOBILE_BETA_AUTHORIZED="${CODEX_COMPANION_MOBILE_BETA_AUTHORIZED:-0}"' in release_source
+    assert "CODEX_COMPANION_MOBILE_BETA_AUTHORIZED must be 0 or 1" in release_source
+    assert "CodexCompanionMobileBetaAuthorized" in release_source
+    assert 'if [[ "$MOBILE_BETA_AUTHORIZED" == "1" ]]; then' in release_source
+    assert "NSBonjourServices" in release_source
+    assert "NSLocalNetworkUsageDescription" in release_source
 
     runtime_source = (
         ROOT / "Sources" / "CodexCompanion" / "Support" / "CompanionMobileRuntime.swift"
     ).read_text()
     assert "CodexCompanion.mobileBetaAccessGranted.v1" in runtime_source
     assert "bundleAuthorization || defaults.bool" in runtime_source
+
+
+def test_local_build_preserves_installed_mobile_configuration_unless_explicitly_overridden():
+    source = BUILD_SCRIPT.read_text()
+    assert '"--print-config"' in source
+
+    with tempfile.TemporaryDirectory() as directory:
+        installed_app = Path(directory) / "Codex Companion.app"
+        info_plist = installed_app / "Contents" / "Info.plist"
+        info_plist.parent.mkdir(parents=True)
+        with info_plist.open("wb") as handle:
+            plistlib.dump(
+                {
+                    "CFBundleVersion": "2",
+                    "CodexCompanionRelayURL": "wss://relay.example.test/relay",
+                    "CodexCompanionMobileBetaAuthorized": True,
+                },
+                handle,
+            )
+
+        inherited_environment = os.environ.copy()
+        inherited_environment.pop("CODEX_COMPANION_RELAY_URL", None)
+        inherited_environment.pop("CODEX_COMPANION_MOBILE_BETA_AUTHORIZED", None)
+        inherited_environment["CODEX_COMPANION_INSTALLED_APP_BUNDLE"] = str(installed_app)
+        inherited = subprocess.run(
+            [str(BUILD_SCRIPT), "--print-config"],
+            cwd=ROOT,
+            env=inherited_environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert "relay_url=wss://relay.example.test/relay" in inherited.stdout
+        assert "mobile_beta_authorized=1" in inherited.stdout
+        assert "build_number=2" in inherited.stdout
+
+        override_environment = inherited_environment.copy()
+        override_environment["CODEX_COMPANION_RELAY_URL"] = ""
+        override_environment["CODEX_COMPANION_MOBILE_BETA_AUTHORIZED"] = "0"
+        override_environment["CODEX_COMPANION_BUILD_NUMBER"] = "3"
+        overridden = subprocess.run(
+            [str(BUILD_SCRIPT), "--print-config"],
+            cwd=ROOT,
+            env=override_environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert "relay_url=" in overridden.stdout
+        assert "relay_url=wss://relay.example.test/relay" not in overridden.stdout
+        assert "mobile_beta_authorized=0" in overridden.stdout
+        assert "build_number=3" in overridden.stdout
 
 
 def test_shared_server_reconfiguration_assets_and_launch_cleanup_are_absent():

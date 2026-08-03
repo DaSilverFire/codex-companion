@@ -1087,6 +1087,65 @@ struct CodexMobileTaskArchiveTests {
     }
 
     @Test
+    func accountHandoffForkAppearsAsOneCanonicalTaskWithActiveRuntimeState() throws {
+        let fixture = try ArchiveFixture()
+        defer { fixture.remove() }
+        let sourceRolloutURL = fixture.codexDirectory.appendingPathComponent("source.jsonl")
+        let forkRolloutURL = fixture.codexDirectory.appendingPathComponent("fork.jsonl")
+        try Data("".utf8).write(to: sourceRolloutURL)
+        try Data(([
+            fixture.messageLine(
+                id: "active-response",
+                role: "assistant",
+                text: "Latest response from the switched account",
+                turnID: "turn-fork"
+            ),
+            fixture.taskLifecycleLine(type: "task_complete", turnID: "turn-fork"),
+        ].joined(separator: "\n") + "\n").utf8).write(to: forkRolloutURL)
+        try fixture.insertThread(
+            id: "source-thread",
+            title: "User renamed task",
+            rolloutURL: sourceRolloutURL,
+            model: "gpt-source",
+            reasoningEffort: "low",
+            recency: 100
+        )
+        try fixture.insertThread(
+            id: "physical-fork",
+            title: "Original first prompt",
+            rolloutURL: forkRolloutURL,
+            model: "gpt-active",
+            reasoningEffort: "",
+            recency: 200
+        )
+        let defaultsName = "CodexMobileTaskArchiveLineageTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        let lineages = CodexThreadLineageStore(defaults: defaults)
+        #expect(lineages.registerFork(
+            sourceThreadID: "source-thread",
+            destinationThreadID: "physical-fork"
+        ) == "source-thread")
+
+        let archive = CodexMobileTaskArchive(
+            homeDirectory: fixture.root,
+            lineageStore: lineages
+        )
+        let page = try archive.tasks(cursor: nil, limit: 20)
+        let task = try #require(page.tasks.first)
+
+        #expect(page.tasks.count == 1)
+        #expect(task.id == "source-thread")
+        #expect(task.title == "User renamed task")
+        #expect(task.preview == "Latest response from the switched account")
+        #expect(task.status == .completed)
+        #expect(task.model == "gpt-active")
+        #expect(task.reasoningEffort == "low")
+        #expect(try archive.messages(threadID: "source-thread", cursor: nil, limit: 20)
+            .messages.map(\.text) == ["Latest response from the switched account"])
+    }
+
+    @Test
     func clearedApprovalRemainsPromotedForTenSeconds() {
         let tracker = CodexApprovalPromotionTracker(holdDuration: 10)
         let start = Date(timeIntervalSince1970: 100)
@@ -1159,14 +1218,18 @@ private struct ArchiveFixture {
         cwd: String = "/tmp/workspace",
         archived: Bool = false,
         source: String = "user",
+        rolloutURL: URL? = nil,
+        model: String = "gpt-test",
+        reasoningEffort: String = "high",
         recency: Int = 100
     ) throws {
         let updatedMilliseconds = Int(Date().timeIntervalSince1970 * 1_000)
+        let rolloutURL = rolloutURL ?? self.rolloutURL
         try runSQLite("""
         insert into threads values (
             '\(sql(id))', '\(sql(title))', '\(sql(cwd))', \(updatedMilliseconds),
             \(updatedMilliseconds / 1_000), '\(sql(firstMessage))', '\(sql(rolloutURL.path))',
-            'Stored preview', 'gpt-test', 'high', \(archived ? 1 : 0), '\(sql(source))', \(recency)
+            'Stored preview', '\(sql(model))', '\(sql(reasoningEffort))', \(archived ? 1 : 0), '\(sql(source))', \(recency)
         );
         """)
     }

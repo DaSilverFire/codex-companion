@@ -2,6 +2,28 @@ import Foundation
 
 protocol OpenAIChatServing: Sendable {
     func send(prompt: String, model: ChatGPTModel, apiKey: String) async throws -> OpenAIChatResult
+    func stream(
+        prompt: String,
+        model: ChatGPTModel,
+        apiKey: String
+    ) -> AsyncThrowingStream<CompanionChatStreamEvent, Error>
+}
+
+extension OpenAIChatServing {
+    func stream(
+        prompt: String,
+        model: ChatGPTModel,
+        apiKey: String
+    ) -> AsyncThrowingStream<CompanionChatStreamEvent, Error> {
+        CompanionChatFinalResponseStream.make {
+            let result = try await send(prompt: prompt, model: model, apiKey: apiKey)
+            return CompanionChatStreamCompletion(
+                text: result.text,
+                inputTokens: result.inputTokens,
+                outputTokens: result.outputTokens
+            )
+        }
+    }
 }
 
 struct OpenAIChatService: OpenAIChatServing {
@@ -9,6 +31,40 @@ struct OpenAIChatService: OpenAIChatServing {
     private let maxOutputTokens = 700
 
     func send(prompt: String, model: ChatGPTModel, apiKey: String) async throws -> OpenAIChatResult {
+        let completion = try await CompanionChatStreamCollector.collect(
+            stream(prompt: prompt, model: model, apiKey: apiKey)
+        )
+        return OpenAIChatResult(
+            text: completion.text,
+            inputTokens: completion.inputTokens,
+            outputTokens: completion.outputTokens
+        )
+    }
+
+    func stream(
+        prompt: String,
+        model: ChatGPTModel,
+        apiKey: String
+    ) -> AsyncThrowingStream<CompanionChatStreamEvent, Error> {
+        CompanionChatFinalResponseStream.make {
+            let result = try await performSend(
+                prompt: prompt,
+                model: model,
+                apiKey: apiKey
+            )
+            return CompanionChatStreamCompletion(
+                text: result.text,
+                inputTokens: result.inputTokens,
+                outputTokens: result.outputTokens
+            )
+        }
+    }
+
+    private func performSend(
+        prompt: String,
+        model: ChatGPTModel,
+        apiKey: String
+    ) async throws -> OpenAIChatResult {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")

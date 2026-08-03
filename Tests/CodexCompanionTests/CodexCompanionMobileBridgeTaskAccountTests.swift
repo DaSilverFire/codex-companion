@@ -62,7 +62,8 @@ struct CodexCompanionMobileBridgeTaskAccountTests {
                     profile: selectedProfile
                 )
                 return CodexThreadAccountHandoffResult(
-                    threadID: forkedThreadID,
+                    threadID: fixture.threadID,
+                    runtimeThreadID: forkedThreadID,
                     rolloutURL: forkedRolloutURL,
                     profileID: selectedProfile.id
                 )
@@ -78,8 +79,8 @@ struct CodexCompanionMobileBridgeTaskAccountTests {
         )
 
         #expect(response.succeeded)
-        #expect(response.threadID == forkedThreadID)
-        #expect(response.message == "Task continued with Main as a new task.")
+        #expect(response.threadID == fixture.threadID)
+        #expect(response.message == "Task continued with Main.")
         let invocation = try #require(recorder.invocation)
         #expect(invocation.threadID == fixture.threadID)
         #expect(invocation.rolloutURL == fixture.rolloutURL.standardizedFileURL)
@@ -88,7 +89,7 @@ struct CodexCompanionMobileBridgeTaskAccountTests {
     }
 
     @Test
-    func destinationMustBeASeparateForkOwnedByTheSelectedAccount() async throws {
+    func runtimeDestinationMustBeASeparateForkOwnedByTheSelectedAccount() async throws {
         let fixture = try TaskAccountBridgeFixture()
         defer { fixture.remove() }
 

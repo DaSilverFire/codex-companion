@@ -5,6 +5,44 @@ import Testing
 @Suite
 struct CodexCompanionMobileBridgeChatTests {
     @Test
+    func remoteCasualChatDisallowsNewMacPrivacyPrompts() async {
+        let service = RecordingAuthorizationModeOnDeviceChatService()
+        let server = CodexCompanionMobileBridgeServer(onDeviceChatService: service)
+        let request = CompanionBridgeRequest(
+            operation: .sendCasualChat,
+            text: "What is on my calendar?",
+            chatAgentID: "general"
+        )
+
+        let response = await server.handle(
+            request,
+            context: CompanionBridgeRequestContext(deviceID: "phone-privacy-test")
+        )
+
+        #expect(response.succeeded)
+        #expect(await service.recordedMode() == .remoteClient)
+    }
+
+    @Test
+    func remoteAuthorizationRequirementReturnsAnActionableMobileError() async {
+        let service = AuthorizationRequiredOnDeviceChatService()
+        let server = CodexCompanionMobileBridgeServer(onDeviceChatService: service)
+        let response = await server.handle(
+            CompanionBridgeRequest(
+                operation: .sendCasualChat,
+                text: "What is on my calendar?",
+                chatAgentID: "general"
+            ),
+            context: CompanionBridgeRequestContext(deviceID: "phone-privacy-test")
+        )
+
+        #expect(!response.succeeded)
+        #expect(response.errorCode == "on_device_authorization_required")
+        #expect(response.message?.contains("Open Codex Companion on the Mac") == true)
+        #expect(await service.recordedMode() == .remoteClient)
+    }
+
+    @Test
     func casualChatForwardsAttachmentsToTheOnDeviceModel() async throws {
         let service = RecordingOnDeviceChatService()
         let server = CodexCompanionMobileBridgeServer(onDeviceChatService: service)
@@ -52,6 +90,71 @@ struct CodexCompanionMobileBridgeChatTests {
 
         #expect(response.succeeded)
         #expect(await service.recordedRequest()?.attachments == [attachment])
+    }
+
+    @Test
+    func casualChatResolvesAStreamedAttachmentWithoutReembeddingItsBytes() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("streamed-chat-attachment-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = RecordingOnDeviceChatService()
+        let uploadStore = CompanionIncomingAttachmentUploadStore(rootURL: directory)
+        let server = CodexCompanionMobileBridgeServer(
+            onDeviceChatService: service,
+            attachmentUploadStore: uploadStore
+        )
+        let deviceID = "phone-stream-test"
+        let context = CompanionBridgeRequestContext(deviceID: deviceID)
+        let uploadID = UUID()
+        let payload = Data("streamed notes".utf8)
+        let attachment = CompanionBridgeAttachment(
+            kind: .file,
+            filename: "notes.txt",
+            mimeType: "text/plain",
+            data: Data(),
+            byteCount: Int64(payload.count),
+            uploadID: uploadID
+        )
+
+        let begin = await server.handle(
+            CompanionBridgeRequest(
+                operation: .beginAttachmentUpload,
+                attachmentUploadID: uploadID,
+                attachmentID: attachment.id,
+                attachmentKind: attachment.kind,
+                attachmentFilename: attachment.filename,
+                attachmentMimeType: attachment.mimeType,
+                attachmentByteCount: attachment.byteCount
+            ),
+            context: context
+        )
+        #expect(begin.succeeded)
+        let chunk = await server.handle(
+            CompanionBridgeRequest(
+                operation: .uploadAttachmentChunk,
+                attachmentUploadID: uploadID,
+                attachmentID: attachment.id,
+                attachmentChunkOffset: 0,
+                attachmentChunkData: payload
+            ),
+            context: context
+        )
+        #expect(chunk.succeeded)
+
+        let response = await server.handle(
+            CompanionBridgeRequest(
+                operation: .sendCasualChat,
+                text: "Summarize this.",
+                attachments: [attachment]
+            ),
+            context: context
+        )
+        let received = try #require(await service.recordedRequest()?.attachments.first)
+
+        #expect(response.succeeded)
+        #expect(received.data.isEmpty)
+        #expect(received.localFileURL != nil)
+        #expect(try Data(contentsOf: #require(received.localFileURL)) == payload)
     }
 
     @Test
@@ -131,6 +234,59 @@ struct CodexCompanionMobileBridgeChatTests {
     }
 
     @Test
+    func casualChatWithStreamIDPublishesOrderedLiveEventsAndFinalResponse() async {
+        let streamID = UUID()
+        let transport = ChatLiveEventTransportSpy()
+        let server = CodexCompanionMobileBridgeServer(
+            onDeviceChatService: StreamingOnDeviceChatService(),
+            nearbyLiveEventSender: transport.sendNearby
+        )
+
+        let response = await server.handle(
+            CompanionBridgeRequest(
+                operation: .sendCasualChat,
+                text: "Stream this",
+                streamID: streamID
+            ),
+            context: CompanionBridgeRequestContext(deviceID: "phone-1")
+        )
+
+        #expect(response.succeeded)
+        #expect(response.chatMessage?.text == "Hello")
+        #expect(transport.calls.map(\.deviceID) == Array(repeating: "phone-1", count: 4))
+        #expect(transport.calls.map(\.event.liveEvent.channel) == Array(repeating: .casualChat, count: 4))
+        #expect(transport.calls.map(\.event.liveEvent.streamID) == Array(repeating: streamID, count: 4))
+        #expect(transport.calls.map(\.event.liveEvent.sequence) == [1, 2, 3, 4])
+        #expect(transport.calls.map(\.event.liveEvent.kind) == [
+            .turnStarted,
+            .assistantDelta,
+            .assistantDelta,
+            .turnCompleted,
+        ])
+        #expect(transport.calls.compactMap(\.event.liveEvent.text) == ["Hel", "lo"])
+    }
+
+    @Test
+    func legacyCasualChatRequestDoesNotPublishLiveEvents() async {
+        let transport = ChatLiveEventTransportSpy()
+        let server = CodexCompanionMobileBridgeServer(
+            onDeviceChatService: RecordingOnDeviceChatService(),
+            nearbyLiveEventSender: transport.sendNearby
+        )
+
+        let response = await server.handle(
+            CompanionBridgeRequest(
+                operation: .sendCasualChat,
+                text: "Use the final response"
+            ),
+            context: CompanionBridgeRequestContext(deviceID: "phone-1")
+        )
+
+        #expect(response.succeeded)
+        #expect(transport.calls.isEmpty)
+    }
+
+    @Test
     func capabilityCatalogSeparatesChatModelsFromChatStyles() {
         let models = CodexAppServerCapabilityService.chatModels(
             hasOpenAIKey: true,
@@ -205,6 +361,75 @@ private actor RecordingOnDeviceChatService: OnDeviceChatServing {
     }
 }
 
+private actor RecordingAuthorizationModeOnDeviceChatService: OnDeviceChatServing {
+    private var mode: OnDeviceChatAuthorizationMode?
+
+    func prewarm() async {}
+
+    func send(prompt: String) async throws -> String {
+        "Remote policy recorded"
+    }
+
+    nonisolated func stream(
+        prompt: String,
+        attachments: [CompanionBridgeAttachment],
+        authorizationMode: OnDeviceChatAuthorizationMode
+    ) -> AsyncThrowingStream<CompanionChatStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                await self.record(authorizationMode)
+                continuation.yield(.started)
+                continuation.yield(.assistantDelta("Remote policy recorded"))
+                continuation.yield(.completed(.init(text: "Remote policy recorded")))
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func record(_ mode: OnDeviceChatAuthorizationMode) {
+        self.mode = mode
+    }
+
+    func recordedMode() -> OnDeviceChatAuthorizationMode? {
+        mode
+    }
+}
+
+private actor AuthorizationRequiredOnDeviceChatService: OnDeviceChatServing {
+    private var mode: OnDeviceChatAuthorizationMode?
+
+    func prewarm() async {}
+
+    func send(prompt: String) async throws -> String {
+        throw CompanionPersonalContextError.calendarAuthorizationRequired
+    }
+
+    nonisolated func stream(
+        prompt: String,
+        attachments: [CompanionBridgeAttachment],
+        authorizationMode: OnDeviceChatAuthorizationMode
+    ) -> AsyncThrowingStream<CompanionChatStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                await self.record(authorizationMode)
+                continuation.finish(
+                    throwing: CompanionPersonalContextError.calendarAuthorizationRequired
+                )
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func record(_ mode: OnDeviceChatAuthorizationMode) {
+        self.mode = mode
+    }
+
+    func recordedMode() -> OnDeviceChatAuthorizationMode? {
+        mode
+    }
+}
+
 private actor RecordingOpenAIChatService: OpenAIChatServing {
     struct Request: Equatable {
         var prompt: String
@@ -240,5 +465,47 @@ private actor RecordingLumoChatService: LumoChatServing {
 
     func recordedRequest() -> Request? {
         request
+    }
+}
+
+private struct StreamingOnDeviceChatService: OnDeviceChatServing {
+    func prewarm() async {}
+
+    func send(prompt: String) async throws -> String {
+        "Hello"
+    }
+
+    func stream(
+        prompt: String,
+        attachments: [CompanionBridgeAttachment]
+    ) -> AsyncThrowingStream<CompanionChatStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(.started)
+            continuation.yield(.assistantDelta("Hel"))
+            continuation.yield(.assistantDelta("lo"))
+            continuation.yield(.completed(.init(text: "Hello")))
+            continuation.finish()
+        }
+    }
+}
+
+private final class ChatLiveEventTransportSpy: @unchecked Sendable {
+    struct Call: Sendable {
+        var event: CompanionBridgeServerEvent
+        var deviceID: String
+    }
+
+    private let lock = NSLock()
+    private var recordedCalls: [Call] = []
+
+    var calls: [Call] {
+        lock.withLock { recordedCalls }
+    }
+
+    func sendNearby(_ event: CompanionBridgeServerEvent, deviceID: String) -> Bool {
+        lock.withLock {
+            recordedCalls.append(.init(event: event, deviceID: deviceID))
+        }
+        return true
     }
 }

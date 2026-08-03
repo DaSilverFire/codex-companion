@@ -6,8 +6,131 @@ protocol CodexAccountProfileRPCClientProviding: Sendable {
 
 struct CodexThreadAccountHandoffResult: Equatable, Sendable {
     var threadID: String
+    var runtimeThreadID: String
     var rolloutURL: URL
     var profileID: UUID
+
+    init(
+        threadID: String,
+        runtimeThreadID: String? = nil,
+        rolloutURL: URL,
+        profileID: UUID
+    ) {
+        self.threadID = threadID
+        self.runtimeThreadID = runtimeThreadID ?? threadID
+        self.rolloutURL = rolloutURL
+        self.profileID = profileID
+    }
+}
+
+struct CodexThreadRuntimeSettings: Equatable, Sendable {
+    var model: String?
+    var reasoningEffort: String?
+}
+
+struct CodexThreadRuntimeSettingsCatalogReader: Sendable {
+    var databaseURL: URL = CodexAccountProfileRuntime.defaultSharedSQLiteHomeURL
+        .appendingPathComponent("state_5.sqlite")
+    var sqliteExecutableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+
+    func settings(for threadID: String) throws -> CodexThreadRuntimeSettings {
+        var visitedThreadIDs: Set<String> = []
+        return try settings(for: threadID, visitedThreadIDs: &visitedThreadIDs)
+    }
+
+    private func settings(
+        for threadID: String,
+        visitedThreadIDs: inout Set<String>
+    ) throws -> CodexThreadRuntimeSettings {
+        guard visitedThreadIDs.insert(threadID).inserted else {
+            return CodexThreadRuntimeSettings(model: nil, reasoningEffort: nil)
+        }
+        let escapedThreadID = threadID.replacingOccurrences(of: "'", with: "''")
+        let columnSeparator = "\u{1f}"
+        let rowSeparator = "\u{1e}"
+        let query = """
+        select coalesce(model, ''), coalesce(reasoning_effort, ''), rollout_path
+        from threads
+        where id = '\(escapedThreadID)'
+        limit 1;
+        """
+        let arguments = CodexSQLiteProcessRunner.readArguments(
+            databaseURL: databaseURL,
+            query: query,
+            columnSeparator: columnSeparator,
+            rowSeparator: rowSeparator
+        )
+        let result = try CodexSQLiteProcessRunner.retryingTransientRead {
+            try CodexSQLiteProcessRunner.run(
+                executableURL: sqliteExecutableURL,
+                arguments: arguments
+            )
+        }
+        guard result.terminationStatus == 0 else {
+            let detail = String(decoding: result.standardError, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw CodexThreadRuntimeSettingsCatalogError.readFailed(detail)
+        }
+        let columns = String(decoding: result.standardOutput, as: UTF8.self)
+            .split(separator: Character(rowSeparator), omittingEmptySubsequences: true)
+            .first?
+            .split(separator: Character(columnSeparator), omittingEmptySubsequences: false)
+            .map(String.init)
+        guard let columns, columns.count >= 3 else {
+            return CodexThreadRuntimeSettings(model: nil, reasoningEffort: nil)
+        }
+        var resolvedSettings = CodexThreadRuntimeSettings(
+            model: Self.nonempty(columns[0]),
+            reasoningEffort: Self.nonempty(columns[1])
+        )
+        if (resolvedSettings.model == nil || resolvedSettings.reasoningEffort == nil),
+           let parentThreadID = Self.forkedFromThreadID(
+               rolloutURL: URL(fileURLWithPath: columns[2])
+           ) {
+            let parentSettings = try settings(
+                for: parentThreadID,
+                visitedThreadIDs: &visitedThreadIDs
+            )
+            resolvedSettings.model = resolvedSettings.model ?? parentSettings.model
+            resolvedSettings.reasoningEffort = resolvedSettings.reasoningEffort
+                ?? parentSettings.reasoningEffort
+        }
+        return resolvedSettings
+    }
+
+    static func forkedFromThreadID(rolloutURL: URL) -> String? {
+        guard
+            let handle = try? FileHandle(forReadingFrom: rolloutURL),
+            let data = try? handle.read(upToCount: 8 * 1_024 * 1_024)
+        else { return nil }
+        try? handle.close()
+        let firstLine = data.firstIndex(of: 0x0A).map { data[..<$0] } ?? data[...]
+        guard
+            let object = try? JSONSerialization.jsonObject(with: Data(firstLine)) as? [String: Any],
+            object["type"] as? String == "session_meta",
+            let payload = object["payload"] as? [String: Any],
+            let parentThreadID = payload["forked_from_id"] as? String
+        else { return nil }
+        return nonempty(parentThreadID)
+    }
+
+    private static func nonempty(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+enum CodexThreadRuntimeSettingsCatalogError: LocalizedError {
+    case readFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .readFailed(let detail):
+            return detail.isEmpty
+                ? "The task's model settings could not be read, so its account was not changed."
+                : detail
+        }
+    }
 }
 
 enum CodexThreadAccountHandoffError: Error, Equatable {
@@ -18,6 +141,7 @@ enum CodexThreadAccountHandoffError: Error, Equatable {
     case server(String)
     case invalidResponse
     case forkMismatch
+    case lineageConflict
     case destinationBindingConflict
     case unverifiableAccountIdentity
     case accountIdentityMismatch
@@ -40,6 +164,8 @@ extension CodexThreadAccountHandoffError: LocalizedError {
             return "Codex returned an unreadable account handoff response."
         case .forkMismatch:
             return "Codex did not create a separate continuation of this task, so the account was not changed."
+        case .lineageConflict:
+            return "Codex returned a continuation that belongs to another task."
         case .destinationBindingConflict:
             return "The continued task was already assigned to a different Codex account."
         case .unverifiableAccountIdentity:
@@ -338,17 +464,276 @@ enum CodexAccountProfileRuntimeError: LocalizedError {
     }
 }
 
+struct CodexThreadLineage: Codable, Equatable, Sendable {
+    var canonicalThreadID: String
+    var activeThreadID: String
+    var physicalThreadIDs: [String]
+}
+
+struct CodexLegacyThreadLineageReader: Sendable {
+    private struct ThreadRecord {
+        var rolloutURL: URL
+        var createdAt: Double
+        var activityAt: Double
+    }
+
+    var databaseURL: URL = CodexAccountProfileRuntime.defaultSharedSQLiteHomeURL
+        .appendingPathComponent("state_5.sqlite")
+    var sqliteExecutableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+
+    func lineages(bindings: [String: String]) -> [CodexThreadLineage] {
+        let normalizedBindings = bindings.reduce(into: [String: UUID]()) { result, entry in
+            guard let profileID = UUID(uuidString: entry.value) else { return }
+            result[entry.key] = profileID
+        }
+        guard !normalizedBindings.isEmpty else { return [] }
+        let quotedIDs = normalizedBindings.keys
+            .map { "'\($0.replacingOccurrences(of: "'", with: "''"))'" }
+            .joined(separator: ",")
+        let query = """
+        select id, rollout_path, created_at,
+               max(
+                   coalesce(recency_at_ms, 0),
+                   coalesce(updated_at_ms, 0),
+                   coalesce(updated_at, 0) * 1000,
+                   coalesce(created_at, 0) * 1000
+               )
+        from threads
+        where id in (\(quotedIDs));
+        """
+        let columnSeparator = "\u{1f}"
+        let rowSeparator = "\u{1e}"
+        let arguments = CodexSQLiteProcessRunner.readArguments(
+            databaseURL: databaseURL,
+            query: query,
+            columnSeparator: columnSeparator,
+            rowSeparator: rowSeparator
+        )
+        guard
+            let result = try? CodexSQLiteProcessRunner.retryingTransientRead(operation: {
+                try CodexSQLiteProcessRunner.run(
+                    executableURL: sqliteExecutableURL,
+                    arguments: arguments
+                )
+            }),
+            result.terminationStatus == 0
+        else { return [] }
+        let records = String(decoding: result.standardOutput, as: UTF8.self)
+            .split(separator: Character(rowSeparator), omittingEmptySubsequences: true)
+            .reduce(into: [String: ThreadRecord]()) { records, row in
+                let columns = row.split(
+                    separator: Character(columnSeparator),
+                    omittingEmptySubsequences: false
+                ).map(String.init)
+                guard columns.count >= 4 else { return }
+                records[columns[0]] = ThreadRecord(
+                    rolloutURL: URL(fileURLWithPath: columns[1]),
+                    createdAt: Double(columns[2]) ?? 0,
+                    activityAt: Double(columns[3]) ?? 0
+                )
+            }
+
+        var parentByChild: [String: String] = [:]
+        var adjacency: [String: Set<String>] = [:]
+        for (childThreadID, record) in records {
+            guard
+                let parentThreadID = CodexThreadRuntimeSettingsCatalogReader
+                    .forkedFromThreadID(rolloutURL: record.rolloutURL),
+                records[parentThreadID] != nil,
+                let childProfileID = normalizedBindings[childThreadID],
+                let parentProfileID = normalizedBindings[parentThreadID],
+                childProfileID != parentProfileID
+            else { continue }
+            parentByChild[childThreadID] = parentThreadID
+            adjacency[childThreadID, default: []].insert(parentThreadID)
+            adjacency[parentThreadID, default: []].insert(childThreadID)
+        }
+
+        var visited: Set<String> = []
+        return adjacency.keys.compactMap { startThreadID -> CodexThreadLineage? in
+            guard visited.insert(startThreadID).inserted else { return nil }
+            var members = [startThreadID]
+            var index = 0
+            while index < members.count {
+                let threadID = members[index]
+                index += 1
+                for neighbor in adjacency[threadID] ?? [] where visited.insert(neighbor).inserted {
+                    members.append(neighbor)
+                }
+            }
+            let ordered = members.sorted {
+                (records[$0]?.createdAt ?? 0) < (records[$1]?.createdAt ?? 0)
+            }
+            guard ordered.count > 1 else { return nil }
+            let activeThreadID = ordered.max {
+                let left = records[$0]
+                let right = records[$1]
+                if left?.activityAt == right?.activityAt {
+                    return (left?.createdAt ?? 0) < (right?.createdAt ?? 0)
+                }
+                return (left?.activityAt ?? 0) < (right?.activityAt ?? 0)
+            } ?? ordered[0]
+            let roots = ordered.filter { parentByChild[$0] == nil }
+            return CodexThreadLineage(
+                canonicalThreadID: roots.first ?? ordered[0],
+                activeThreadID: activeThreadID,
+                physicalThreadIDs: ordered
+            )
+        }
+    }
+}
+
+final class CodexThreadLineageStore: @unchecked Sendable {
+    static let lineagesKey = "com.silverfire.codexcompanion.codex-thread-lineages"
+
+    private static let lock = NSLock()
+    private static let legacyInferenceLock = NSLock()
+    private static var cachedLegacyLineages: [CodexThreadLineage]?
+    private let defaults: UserDefaults
+    private let inferredLineages: [CodexThreadLineage]
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        if defaults === UserDefaults.standard {
+            inferredLineages = Self.legacyInferenceLock.withLock {
+                if let cachedLegacyLineages = Self.cachedLegacyLineages {
+                    return cachedLegacyLineages
+                }
+                let bindings = defaults.dictionary(
+                    forKey: CodexThreadAccountProfileBindingStore.bindingsKey
+                ) as? [String: String] ?? [:]
+                let lineages = CodexLegacyThreadLineageReader().lineages(bindings: bindings)
+                Self.cachedLegacyLineages = lineages
+                return lineages
+            }
+        } else {
+            inferredLineages = []
+        }
+    }
+
+    func canonicalThreadID(for threadID: String) -> String {
+        let normalized = Self.normalize(threadID)
+        guard !normalized.isEmpty else { return normalized }
+        return Self.lock.withLock {
+            lineage(containing: normalized, in: loadLineages())?.canonicalThreadID ?? normalized
+        }
+    }
+
+    func activeThreadID(for threadID: String) -> String {
+        let normalized = Self.normalize(threadID)
+        guard !normalized.isEmpty else { return normalized }
+        return Self.lock.withLock {
+            lineage(containing: normalized, in: loadLineages())?.activeThreadID ?? normalized
+        }
+    }
+
+    func lineages() -> [CodexThreadLineage] {
+        Self.lock.withLock { loadLineages() }
+    }
+
+    func canRegisterFork(sourceThreadID: String, destinationThreadID: String) -> Bool {
+        let source = Self.normalize(sourceThreadID)
+        let destination = Self.normalize(destinationThreadID)
+        guard !source.isEmpty, !destination.isEmpty, source != destination else { return false }
+        return Self.lock.withLock {
+            let lineages = loadLineages()
+            let sourceLineage = lineage(containing: source, in: lineages)
+            guard (sourceLineage?.activeThreadID ?? source) == source else { return false }
+            return lineage(containing: destination, in: lineages) == nil
+        }
+    }
+
+    @discardableResult
+    func registerFork(sourceThreadID: String, destinationThreadID: String) -> String? {
+        let source = Self.normalize(sourceThreadID)
+        let destination = Self.normalize(destinationThreadID)
+        guard !source.isEmpty, !destination.isEmpty, source != destination else { return nil }
+        return Self.lock.withLock {
+            var lineages = loadLineages()
+            let sourceIndex = lineages.firstIndex { $0.physicalThreadIDs.contains(source) }
+            let destinationIndex = lineages.firstIndex { $0.physicalThreadIDs.contains(destination) }
+            if let sourceIndex, lineages[sourceIndex].activeThreadID != source { return nil }
+            if destinationIndex != nil { return nil }
+
+            let canonicalThreadID: String
+            if let sourceIndex {
+                canonicalThreadID = lineages[sourceIndex].canonicalThreadID
+                if !lineages[sourceIndex].physicalThreadIDs.contains(destination) {
+                    lineages[sourceIndex].physicalThreadIDs.append(destination)
+                }
+                lineages[sourceIndex].activeThreadID = destination
+            } else {
+                canonicalThreadID = source
+                lineages.append(CodexThreadLineage(
+                    canonicalThreadID: source,
+                    activeThreadID: destination,
+                    physicalThreadIDs: [source, destination]
+                ))
+            }
+            saveLineages(lineages)
+            return canonicalThreadID
+        }
+    }
+
+    private func lineage(
+        containing threadID: String,
+        in lineages: [CodexThreadLineage]
+    ) -> CodexThreadLineage? {
+        lineages.first { $0.physicalThreadIDs.contains(threadID) }
+    }
+
+    private func loadLineages() -> [CodexThreadLineage] {
+        let persisted: [CodexThreadLineage]
+        if let data = defaults.data(forKey: Self.lineagesKey) {
+            persisted = (try? JSONDecoder().decode([CodexThreadLineage].self, from: data)) ?? []
+        } else {
+            persisted = []
+        }
+        return inferredLineages.reduce(into: persisted) { lineages, inferred in
+            guard let index = lineages.firstIndex(where: {
+                !Set($0.physicalThreadIDs).isDisjoint(with: inferred.physicalThreadIDs)
+            }) else {
+                lineages.append(inferred)
+                return
+            }
+            for threadID in inferred.physicalThreadIDs
+                where !lineages[index].physicalThreadIDs.contains(threadID)
+            {
+                lineages[index].physicalThreadIDs.append(threadID)
+            }
+        }
+    }
+
+    private func saveLineages(_ lineages: [CodexThreadLineage]) {
+        guard let data = try? JSONEncoder().encode(lineages) else { return }
+        defaults.set(data, forKey: Self.lineagesKey)
+    }
+
+    private static func normalize(_ threadID: String) -> String {
+        threadID.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 final class CodexThreadAccountProfileBindingStore: @unchecked Sendable {
     static let bindingsKey = "com.silverfire.codexcompanion.codex-thread-account-profile-bindings"
 
     private let defaults: UserDefaults
+    fileprivate let lineageStore: CodexThreadLineageStore
     private let lock = NSLock()
 
-    init(defaults: UserDefaults = .standard) {
+    init(
+        defaults: UserDefaults = .standard,
+        lineageStore: CodexThreadLineageStore? = nil
+    ) {
         self.defaults = defaults
+        self.lineageStore = lineageStore ?? CodexThreadLineageStore(defaults: defaults)
     }
 
     func profileID(for threadID: String) -> UUID? {
+        profileID(forPhysicalThreadID: lineageStore.activeThreadID(for: threadID))
+    }
+
+    func profileID(forPhysicalThreadID threadID: String) -> UUID? {
         let normalizedThreadID = threadID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedThreadID.isEmpty else { return nil }
         return lock.withLock {
@@ -402,22 +787,33 @@ final class CodexThreadAccountProfileBindingStore: @unchecked Sendable {
 
 enum CodexThreadAccountHandoffRequestFactory {
     static func accountRead(id: Int) -> CodexRPCRequest {
-        CodexRPCRequest(
+        return CodexRPCRequest(
             id: id,
             method: "account/read",
             params: ["refreshToken": true]
         )
     }
 
-    static func fork(id: Int, threadID: String) -> CodexRPCRequest {
-        CodexRPCRequest(
+    static func fork(
+        id: Int,
+        threadID: String,
+        settings: CodexThreadRuntimeSettings
+    ) -> CodexRPCRequest {
+        var params: [String: Any] = [
+            "threadId": threadID,
+            "excludeTurns": true,
+            "deferGoalContinuation": true,
+        ]
+        if let model = settings.model {
+            params["model"] = model
+        }
+        if let reasoningEffort = settings.reasoningEffort {
+            params["config"] = ["model_reasoning_effort": reasoningEffort]
+        }
+        return CodexRPCRequest(
             id: id,
             method: "thread/fork",
-            params: [
-                "threadId": threadID,
-                "excludeTurns": true,
-                "deferGoalContinuation": true,
-            ]
+            params: params
         )
     }
 }
@@ -519,9 +915,13 @@ struct CodexAccountProfileRuntimeVerifier: Sendable {
 }
 
 final class CodexThreadAccountHandoffService: @unchecked Sendable {
+    typealias ThreadSettingsProvider = @Sendable (String) throws -> CodexThreadRuntimeSettings
+
     private let clientProvider: any CodexAccountProfileRPCClientProviding
     private let bindingStore: CodexThreadAccountProfileBindingStore
     private let identityStore: CodexAccountProfileIdentityStore
+    private let lineageStore: CodexThreadLineageStore
+    private let threadSettingsProvider: ThreadSettingsProvider
 
     init(
         clientProvider: any CodexAccountProfileRPCClientProviding =
@@ -529,11 +929,17 @@ final class CodexThreadAccountHandoffService: @unchecked Sendable {
         bindingStore: CodexThreadAccountProfileBindingStore =
             CodexThreadAccountProfileBindingStore(),
         identityStore: CodexAccountProfileIdentityStore =
-            CodexAccountProfileIdentityStore()
+            CodexAccountProfileIdentityStore(),
+        lineageStore: CodexThreadLineageStore? = nil,
+        threadSettingsProvider: @escaping ThreadSettingsProvider = { threadID in
+            try CodexThreadRuntimeSettingsCatalogReader().settings(for: threadID)
+        }
     ) {
         self.clientProvider = clientProvider
         self.bindingStore = bindingStore
         self.identityStore = identityStore
+        self.lineageStore = lineageStore ?? bindingStore.lineageStore
+        self.threadSettingsProvider = threadSettingsProvider
     }
 
     func handoff(
@@ -556,9 +962,13 @@ final class CodexThreadAccountHandoffService: @unchecked Sendable {
             throw CodexThreadAccountHandoffError.invalidRolloutPath
         }
 
+        let canonicalThreadID = lineageStore.canonicalThreadID(for: normalizedThreadID)
+        let runtimeThreadID = lineageStore.activeThreadID(for: normalizedThreadID)
+
         CodexAccountRuntimeDiagnostics.append(
             "handoff begin profile=\(profile.id.uuidString) label=\(profile.label) "
-                + "thread=\(normalizedThreadID) rollout=\(normalizedRolloutURL.path)"
+                + "canonical_thread=\(canonicalThreadID) runtime_thread=\(runtimeThreadID) "
+                + "rollout=\(normalizedRolloutURL.path)"
         )
 
         let client = try clientProvider.client(for: profile)
@@ -594,9 +1004,11 @@ final class CodexThreadAccountHandoffService: @unchecked Sendable {
                 + "plan=\(actualIdentity.planType ?? "unknown")"
         )
 
+        let sourceSettings = try threadSettingsProvider(runtimeThreadID)
         let request = CodexThreadAccountHandoffRequestFactory.fork(
             id: 3,
-            threadID: normalizedThreadID
+            threadID: runtimeThreadID,
+            settings: sourceSettings
         )
         let responses = try client.perform([request])
         guard let response = responses[request.id] else {
@@ -624,13 +1036,19 @@ final class CodexThreadAccountHandoffService: @unchecked Sendable {
         let normalizedForkedURL = URL(fileURLWithPath: forkedPath).standardizedFileURL
         guard
             !normalizedForkedThreadID.isEmpty,
-            normalizedForkedThreadID != normalizedThreadID,
-            normalizedForkedFromThreadID == normalizedThreadID,
+            normalizedForkedThreadID != runtimeThreadID,
+            normalizedForkedFromThreadID == runtimeThreadID,
             normalizedForkedURL.isFileURL,
             !normalizedForkedURL.path.isEmpty,
             normalizedForkedURL != normalizedRolloutURL
         else {
             throw CodexThreadAccountHandoffError.forkMismatch
+        }
+        guard lineageStore.canRegisterFork(
+            sourceThreadID: runtimeThreadID,
+            destinationThreadID: normalizedForkedThreadID
+        ) else {
+            throw CodexThreadAccountHandoffError.lineageConflict
         }
 
         let committedProfileID = bindingStore.bindIfUnbound(
@@ -640,15 +1058,23 @@ final class CodexThreadAccountHandoffService: @unchecked Sendable {
         guard committedProfileID == profile.id else {
             throw CodexThreadAccountHandoffError.destinationBindingConflict
         }
+        guard lineageStore.registerFork(
+            sourceThreadID: runtimeThreadID,
+            destinationThreadID: normalizedForkedThreadID
+        ) == canonicalThreadID else {
+            throw CodexThreadAccountHandoffError.lineageConflict
+        }
         identityStore.save(actualIdentity, for: profile.id)
         CodexAccountRuntimeDiagnostics.append(
             "handoff committed profile=\(profile.id.uuidString) "
-                + "source_thread=\(normalizedThreadID) "
+                + "canonical_thread=\(canonicalThreadID) "
+                + "source_thread=\(runtimeThreadID) "
                 + "destination_thread=\(normalizedForkedThreadID) "
                 + "destination_rollout=\(normalizedForkedURL.path)"
         )
         return CodexThreadAccountHandoffResult(
-            threadID: normalizedForkedThreadID,
+            threadID: canonicalThreadID,
+            runtimeThreadID: normalizedForkedThreadID,
             rolloutURL: normalizedForkedURL,
             profileID: profile.id
         )

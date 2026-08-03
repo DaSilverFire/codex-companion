@@ -316,6 +316,62 @@ struct PetStoreTests {
         #expect(lookFrames.spritesheetURL.lastPathComponent == "look-spritesheet.webp")
     }
 
+    @Test
+    func loadsOptionalMobilePresenceWithoutChangingRenderIdentity() throws {
+        let environment = try TestEnvironment()
+        defer { environment.cleanup() }
+        try makePet(id: "shadow-16", columns: 16, rows: 12, in: environment.companion)
+        let directory = environment.companion.appendingPathComponent("shadow-16", isDirectory: true)
+        let storeBefore = makeStore(environment)
+        let identityBefore = try #require(storeBefore.pets.first).renderIdentity
+        let manifestURL = directory.appendingPathComponent("pet.json")
+        var manifest = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any]
+        )
+        manifest["mobilePresence"] = [
+            "directory": "mobile-presence",
+            "packageID": "shadow-16-mobile-presence-v1",
+            "contentHash": String(repeating: "a", count: 64),
+        ]
+        try JSONSerialization.data(withJSONObject: manifest).write(to: manifestURL)
+        try FileManager.default.createDirectory(
+            at: directory.appendingPathComponent("mobile-presence", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+
+        let pet = try #require(makeStore(environment).pets.first)
+        let presence = try #require(pet.mobilePresence)
+
+        #expect(presence.directoryURL.lastPathComponent == "mobile-presence")
+        #expect(presence.packageID == "shadow-16-mobile-presence-v1")
+        #expect(presence.contentHash == String(repeating: "a", count: 64))
+        #expect(pet.renderIdentity == identityBefore)
+    }
+
+    @Test
+    func rejectsUnsafeMobilePresenceDirectoryWithoutRejectingDesktopPet() throws {
+        let environment = try TestEnvironment()
+        defer { environment.cleanup() }
+        try makePet(id: "shadow-16", columns: 16, rows: 12, in: environment.companion)
+        let directory = environment.companion.appendingPathComponent("shadow-16", isDirectory: true)
+        let manifestURL = directory.appendingPathComponent("pet.json")
+        var manifest = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any]
+        )
+        manifest["mobilePresence"] = [
+            "directory": "../outside",
+            "packageID": "shadow-16-mobile-presence-v1",
+            "contentHash": String(repeating: "b", count: 64),
+        ]
+        try JSONSerialization.data(withJSONObject: manifest).write(to: manifestURL)
+
+        let pet = try #require(makeStore(environment).pets.first)
+
+        #expect(pet.mobilePresence == nil)
+        #expect(pet.spriteColumns == 16)
+        #expect(pet.spriteRows == 12)
+    }
+
     private func makeStore(_ environment: TestEnvironment) -> PetStore {
         PetStore(
             roots: PetRoots(companion: environment.companion, native: environment.native),

@@ -88,6 +88,42 @@ struct CodexGoalControlTests {
         ))
     }
 
+    @Test
+    @MainActor
+    func canonicalDesktopGoalMutationTargetsTheActivePhysicalFork() async throws {
+        let defaultsName = "CodexGoalControlLineageTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        let lineages = CodexThreadLineageStore(defaults: defaults)
+        #expect(lineages.registerFork(
+            sourceThreadID: "canonical-thread",
+            destinationThreadID: "physical-fork"
+        ) == "canonical-thread")
+        let recorder = GoalWriteRecorder()
+        let store = CodexProcessStore(
+            writeGoal: { threadID, objective, status, tokenBudget in
+                recorder.write(
+                    threadID: threadID,
+                    objective: objective,
+                    status: status,
+                    tokenBudget: tokenBudget
+                )
+            },
+            defaults: defaults,
+            lineageStore: lineages
+        )
+
+        let goal = try await store.setGoal(
+            threadID: "canonical-thread",
+            objective: nil,
+            status: .active,
+            tokenBudget: nil
+        )
+
+        #expect(recorder.threadIDs == ["physical-fork"])
+        #expect(goal.threadID == "canonical-thread")
+    }
+
     private static func item(
         goalStatus: CodexGoalStatus?,
         objective: String?,
@@ -110,6 +146,36 @@ struct CodexGoalControlTests {
             goalTokenBudget: tokenBudget,
             goalElapsedSeconds: goalStatus == nil ? nil : 90,
             goalTimerReferenceDate: nil
+        )
+    }
+}
+
+private final class GoalWriteRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedThreadIDs: [String] = []
+
+    var threadIDs: [String] {
+        lock.withLock { recordedThreadIDs }
+    }
+
+    func write(
+        threadID: String,
+        objective: String?,
+        status: CodexGoalStatus?,
+        tokenBudget: Int?
+    ) -> CodexGoalSnapshot {
+        _ = objective
+        _ = tokenBudget
+        lock.withLock { recordedThreadIDs.append(threadID) }
+        return CodexGoalSnapshot(
+            threadID: threadID,
+            objective: "Preserve the goal",
+            status: status ?? .blocked,
+            tokenBudget: nil,
+            tokensUsed: 0,
+            timeUsedSeconds: 10,
+            createdAt: 100,
+            updatedAt: 110
         )
     }
 }

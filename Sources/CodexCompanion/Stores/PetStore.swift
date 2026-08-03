@@ -140,6 +140,7 @@ final class PetStore: ObservableObject {
                 spriteRows: max(1, manifest.spriteRows ?? 9),
                 animationFrameCounts: manifest.animationFrameCounts ?? [:],
                 directionalLookFrames: directionalLookFrames,
+                mobilePresence: mobilePresence(from: manifest, in: directory),
                 source: .custom(directory)
             )
         }
@@ -186,6 +187,52 @@ final class PetStore: ObservableObject {
         case "null-signal": "Null Signal"
         default: slug.displayTitle
         }
+    }
+
+    private func mobilePresence(
+        from manifest: PetManifest,
+        in petDirectory: URL
+    ) -> PetDefinition.MobilePresence? {
+        guard let value = manifest.mobilePresence else { return nil }
+        let directory = value.directory.trimmingCharacters(in: .whitespacesAndNewlines)
+        let packageID = value.packageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let contentHash = value.contentHash.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = directory.split(separator: "/", omittingEmptySubsequences: false)
+        guard
+            !directory.isEmpty,
+            !directory.hasPrefix("/"),
+            !directory.contains("\\"),
+            directory != ".",
+            !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }),
+            !packageID.isEmpty,
+            contentHash.range(
+                of: "^[0-9a-f]{64}$",
+                options: .regularExpression
+            ) != nil
+        else {
+            return nil
+        }
+
+        let packageDirectory = petDirectory
+            .appendingPathComponent(directory, isDirectory: true)
+            .standardizedFileURL
+        let rootComponents = petDirectory.standardizedFileURL.pathComponents
+        guard Array(packageDirectory.pathComponents.prefix(rootComponents.count)) == rootComponents
+        else {
+            return nil
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(
+            atPath: packageDirectory.path,
+            isDirectory: &isDirectory
+        ), isDirectory.boolValue else {
+            return nil
+        }
+        return PetDefinition.MobilePresence(
+            directoryURL: packageDirectory,
+            packageID: packageID,
+            contentHash: contentHash
+        )
     }
 
     private func sourceSortRank(_ source: PetSource) -> Int {

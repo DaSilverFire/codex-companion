@@ -1,6 +1,6 @@
 import Foundation
 
-enum PetSource: Hashable {
+enum PetSource: Hashable, Sendable {
     case custom(URL)
     case builtIn(URL)
 
@@ -14,12 +14,18 @@ enum PetSource: Hashable {
     }
 }
 
-struct PetDefinition: Identifiable, Hashable {
-    struct DirectionalLookFrames: Hashable {
+struct PetDefinition: Identifiable, Hashable, Sendable {
+    struct DirectionalLookFrames: Hashable, Sendable {
         var spritesheetURL: URL
         var spriteColumns: Int
         var spriteRows: Int
         var startRow: Int
+    }
+
+    struct MobilePresence: Hashable, Sendable {
+        var directoryURL: URL
+        var packageID: String
+        var contentHash: String
     }
 
     var id: String
@@ -30,6 +36,7 @@ struct PetDefinition: Identifiable, Hashable {
     var spriteRows: Int
     var animationFrameCounts: [String: Int]
     var directionalLookFrames: DirectionalLookFrames? = nil
+    var mobilePresence: MobilePresence? = nil
     var source: PetSource
 
     var renderIdentity: String {
@@ -96,6 +103,12 @@ struct PetDefinition: Identifiable, Hashable {
 }
 
 struct PetManifest: Decodable {
+    struct MobilePresence: Decodable {
+        var directory: String
+        var packageID: String
+        var contentHash: String
+    }
+
     var id: String?
     var displayName: String?
     var description: String?
@@ -107,4 +120,5 @@ struct PetManifest: Decodable {
     var lookSpriteColumns: Int?
     var lookSpriteRows: Int?
     var lookFrameStartRow: Int?
+    var mobilePresence: MobilePresence?
 }

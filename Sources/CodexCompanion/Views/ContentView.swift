@@ -27,12 +27,14 @@ struct ContentView: View {
         .onChange(of: model.isQuickBarOpen) { _, isOpen in
             if !isOpen {
                 CodexUsagePanel.shared.dismiss()
+                ChatDeliveryPanel.shared.dismiss()
                 isUsagePresented = false
                 isChatModelPickerPresented = false
             }
         }
         .onChange(of: model.isCodexProcessTrayVisible) { _, _ in
             CodexUsagePanel.shared.dismiss()
+            ChatDeliveryPanel.shared.dismiss()
             isUsagePresented = false
             isChatModelPickerPresented = false
         }
@@ -157,7 +159,7 @@ struct ContentView: View {
 
     private var codexUsageButton: some View {
         Button {
-            isChatModelPickerPresented = false
+            ChatDeliveryPanel.shared.dismiss()
             CodexUsagePanel.shared.toggle(
                 store: model.rateLimitStore,
                 selectionChanged: {
@@ -197,9 +199,14 @@ struct ContentView: View {
         Button {
             CodexUsagePanel.shared.dismiss()
             isUsagePresented = false
-            withAnimation(menuToggleAnimation) {
-                isChatModelPickerPresented.toggle()
-            }
+            ChatDeliveryPanel.shared.toggle(
+                model: model,
+                presentationChanged: { isPresented in
+                    withAnimation(menuToggleAnimation) {
+                        isChatModelPickerPresented = isPresented
+                    }
+                }
+            )
         } label: {
             Image(systemName: "sparkles")
                 .font(.system(size: 13, weight: .semibold))
@@ -222,16 +229,12 @@ struct ContentView: View {
         .contentShape(Circle())
         .accessibilityLabel("Chat service and model")
         .help("Chat service and model")
-        .popover(isPresented: $isChatModelPickerPresented, arrowEdge: .bottom) {
-            ChatDeliveryPicker(model: model) {
-                isChatModelPickerPresented = false
-            }
-        }
     }
 
     private var modeButton: some View {
         Button {
             CodexUsagePanel.shared.dismiss()
+            ChatDeliveryPanel.shared.dismiss()
             isUsagePresented = false
             isChatModelPickerPresented = false
             if model.isCodexProcessTrayVisible {

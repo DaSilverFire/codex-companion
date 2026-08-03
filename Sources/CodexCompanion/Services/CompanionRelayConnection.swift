@@ -81,6 +81,7 @@ actor CompanionRelayConnection {
         String: CheckedContinuation<Void, Error>
     ] = [:]
     private var packetResultTimeoutTasks: [String: Task<Void, Never>] = [:]
+    private var envelopeReassembler = CompanionRelayEnvelopeReassembler()
 
     init(
         url: URL,
@@ -145,6 +146,7 @@ actor CompanionRelayConnection {
         runTask = nil
         modernSendOperation = nil
         modernPingOperation = nil
+        envelopeReassembler.reset()
         connectionGeneration = UUID()
         connection?.stateUpdateHandler = nil
         connection?.cancel()
@@ -172,12 +174,13 @@ actor CompanionRelayConnection {
         else {
             throw CompanionRelayWireError.metadataMismatch
         }
-        let packetID = UUID().uuidString
-        let wire = try CompanionRelayWireMessage.packet(
-            envelope: envelope,
-            packetID: packetID
-        )
-        try await sendAndAwaitPacketResult(wire, packetID: packetID)
+        let packets = try CompanionRelayWireMessage.packets(envelope: envelope)
+        for wire in packets {
+            guard let packetID = wire.packetID else {
+                throw CompanionRelayWireError.invalidPacket
+            }
+            try await sendAndAwaitPacketResult(wire, packetID: packetID)
+        }
     }
 
     func currentState() -> State {
@@ -193,6 +196,7 @@ actor CompanionRelayConnection {
         runTask?.cancel()
         runTask = nil
         relayRegistrationAcknowledged = false
+        envelopeReassembler.reset()
         modernSendOperation = nil
         modernPingOperation = nil
         connectionGeneration = UUID()
@@ -463,6 +467,7 @@ actor CompanionRelayConnection {
     private func handleFailure(_ error: Error, generation: UUID) {
         guard shouldRun, generation == connectionGeneration else { return }
         relayRegistrationAcknowledged = false
+        envelopeReassembler.reset()
         failPendingPacketResults(error)
         let nsError = error as NSError
         failureHandler(
@@ -504,7 +509,9 @@ actor CompanionRelayConnection {
             guard state == .registered else {
                 throw CompanionRelayConnectionError.invalidWireMessage
             }
-            let envelope = try wire.decodedEnvelope()
+            guard let envelope = try envelopeReassembler.receive(wire) else {
+                return
+            }
             guard envelope.channelID == channelID,
                   envelope.senderID != endpointID
             else {

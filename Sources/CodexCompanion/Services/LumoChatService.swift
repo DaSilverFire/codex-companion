@@ -2,6 +2,28 @@ import Foundation
 
 protocol LumoChatServing: Sendable {
     func send(prompt: String, model: LumoModel, apiKey: String) async throws -> LumoChatResult
+    func stream(
+        prompt: String,
+        model: LumoModel,
+        apiKey: String
+    ) -> AsyncThrowingStream<CompanionChatStreamEvent, Error>
+}
+
+extension LumoChatServing {
+    func stream(
+        prompt: String,
+        model: LumoModel,
+        apiKey: String
+    ) -> AsyncThrowingStream<CompanionChatStreamEvent, Error> {
+        CompanionChatFinalResponseStream.make {
+            let result = try await send(prompt: prompt, model: model, apiKey: apiKey)
+            return CompanionChatStreamCompletion(
+                text: result.text,
+                inputTokens: result.inputTokens,
+                outputTokens: result.outputTokens
+            )
+        }
+    }
 }
 
 struct LumoChatService: LumoChatServing {
@@ -17,6 +39,40 @@ struct LumoChatService: LumoChatServing {
     }
 
     func send(prompt: String, model: LumoModel, apiKey: String) async throws -> LumoChatResult {
+        let completion = try await CompanionChatStreamCollector.collect(
+            stream(prompt: prompt, model: model, apiKey: apiKey)
+        )
+        return LumoChatResult(
+            text: completion.text,
+            inputTokens: completion.inputTokens,
+            outputTokens: completion.outputTokens
+        )
+    }
+
+    func stream(
+        prompt: String,
+        model: LumoModel,
+        apiKey: String
+    ) -> AsyncThrowingStream<CompanionChatStreamEvent, Error> {
+        CompanionChatFinalResponseStream.make {
+            let result = try await performSend(
+                prompt: prompt,
+                model: model,
+                apiKey: apiKey
+            )
+            return CompanionChatStreamCompletion(
+                text: result.text,
+                inputTokens: result.inputTokens,
+                outputTokens: result.outputTokens
+            )
+        }
+    }
+
+    private func performSend(
+        prompt: String,
+        model: LumoModel,
+        apiKey: String
+    ) async throws -> LumoChatResult {
         let request = try makeRequest(prompt: prompt, model: model, apiKey: apiKey)
         let (data, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {

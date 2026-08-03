@@ -163,8 +163,8 @@ struct CodexUsagePresentationTests {
         #expect(!quickBarSource.contains("LongPressGesture"))
         #expect(!quickBarSource.contains("longPressAction"))
         #expect(contentSource.contains("private var chatModelButton"))
-        #expect(contentSource.contains("ChatDeliveryPicker(model: model)"))
-        #expect(contentSource.contains(".popover(isPresented: $isChatModelPickerPresented"))
+        #expect(contentSource.contains("ChatDeliveryPanel.shared.toggle"))
+        #expect(!contentSource.contains(".popover(isPresented: $isChatModelPickerPresented"))
     }
 
     @Test
@@ -186,5 +186,43 @@ struct CodexUsagePresentationTests {
         #expect(surfaceSource.contains(".regular.interactive()"))
         #expect(surfaceSource.contains(".glassEffectTransition(.materialize)"))
         #expect(surfaceSource.contains(".presentationBackground(.clear)"))
+    }
+
+    @Test
+    func chatModelMenuUsesACompactServiceFirstPresentation() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(contentsOf: root
+            .appendingPathComponent("Sources/CodexCompanion/Views/QuickBarTrayView.swift"))
+
+        #expect(source.contains("width: ChatDeliveryPresentationMetrics.panelWidth"))
+        #expect(source.contains("cornerRadius: CodexUsagePresentationMetrics.cornerRadius"))
+        #expect(source.contains("Label(\"Chat model\", systemImage: \"sparkles\")"))
+        #expect(source.contains("Picker(\"Chat service\""))
+        #expect(source.contains("selectedDeliverySection"))
+        #expect(!source.contains(".frame(maxHeight: 360)"))
+    }
+
+    @Test
+    func chatModelMenuUsesTheSameUpwardPanelPolicyAsUsage() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let panelSource = try String(contentsOf: root
+            .appendingPathComponent("Sources/CodexCompanion/Views/ChatDeliveryPanel.swift"))
+        let contentSource = try String(contentsOf: root
+            .appendingPathComponent("Sources/CodexCompanion/Views/ContentView.swift"))
+        let quickBarSource = try String(contentsOf: root
+            .appendingPathComponent("Sources/CodexCompanion/Views/QuickBarTrayView.swift"))
+
+        #expect(panelSource.contains("CodexUsagePanelPositioningPolicy.frame"))
+        #expect(panelSource.contains("PetTrayPanel.shared.usagePresentationGeometry"))
+        #expect(panelSource.contains("ChatDeliveryPresentationMetrics.panelWidth"))
+        #expect(contentSource.contains("ChatDeliveryPanel.shared.toggle"))
+        #expect(quickBarSource.contains("ChatDeliveryPanel.shared.toggle"))
+        #expect(!quickBarSource.contains(".popover(isPresented: $isPresented, arrowEdge: .bottom)"))
     }
 }

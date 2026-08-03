@@ -1,6 +1,6 @@
 ---
 name: companion-pet
-description: Use when creating, auditing, migrating, validating, or previewing Codex Companion pet animations; when an older pet package differs from the current ChatGPT/Codex schema; or when preparing Companion-only thinking and talking candidates.
+description: Use when creating, auditing, migrating, validating, packaging, or previewing Codex Companion pet animations; when turning a normal Codex pet into a Companion-ready package; when an older pet package differs from the current ChatGPT/Codex schema; or when preparing Companion goal-complete, thinking, and talking states.
 ---
 
 # Companion Pet
@@ -21,6 +21,7 @@ Read [references/companion-contract.md](references/companion-contract.md) before
 - Do not install `thinking`, `talking`, or another extension state unless the current Companion runtime explicitly exposes it and the user requested installation.
 - Do not invent missing pet art with Pillow, SVG, canvas, mirroring, or procedural body-part transforms. Deterministic code may split, chroma-key, align, assemble, hash, validate, and preview generated art.
 - Never mark a generation complete by hand. Use `ingest` so source hashes and nearest-neighbor provenance are recorded.
+- Compact mobile presence art is authored separately. It is not a downscaled desktop spritesheet or a fallback replacement for desktop animation rows.
 
 ## Discover The Contract
 
@@ -40,16 +41,16 @@ If current source disagrees, create or supply a newer schema JSON and record its
 ## New Pet Workflow
 
 1. Run `$hatch-pet` for the base identity and standard runtime rows.
-2. Select whole-body identity references with complete anatomy, black nose, correct eyes, no labels, no magenta, and no detached marks.
+2. Select whole-body identity references with complete, correct anatomy, stable identity details, no labels, no magenta, and no detached marks.
 3. Prepare Companion candidates against the current schema:
 
 ```bash
 SKILL_DIR="${CODEX_HOME:-$HOME/.codex}/skills/companion-pet"
 python3 "$SKILL_DIR/scripts/companion_pet_assets.py" prepare \
   --run-dir /absolute/path/to/companion-run \
-  --pet-id shadow \
-  --display-name Shadow \
-  --reference /absolute/path/to/shadow-reference.png \
+  --pet-id nova \
+  --display-name Nova \
+  --reference /absolute/path/to/nova-reference.png \
   --states thinking,talking
 ```
 
@@ -109,14 +110,71 @@ The report verifies manifest/atlas geometry, hashes the source, compares it with
 
 Pass `--target-schema` to `inspect-pet` when Companion targets a different explicit contract.
 
-## Shadow Gate
+## Convert A Normal Codex Pet
 
-Every accepted frame must have:
+`prepare-conversion` derives a 12-row Companion contract from the source pet instead of assuming a fixed column count. It preserves rows 0-8 as the standard Codex animations, stages distinct goal-complete, thinking, and talking rows, and records the immutable source hashes:
 
-- exactly four total cat legs, with no extra, duplicated, merged, malformed, hidden-as-one, or cut-off limbs;
-- Shadow's compact black-cat silhouette, face, proportions, tail, palette, outline grammar, and black nose;
-- golden eyes in open-eye frames; eyelids may cover them during a blink but may not recolor them;
-- no magenta, labels, text, numbers, watermarks, guide marks, bubbles, punctuation, UI, scenery, floor, opaque background, detached effects, shadows, glow, blur, or slot crossing;
+```bash
+python3 "$SKILL_DIR/scripts/companion_pet_assets.py" prepare-conversion \
+  --run-dir /absolute/path/to/companion-run \
+  --source-pet-dir /absolute/path/to/native-pet \
+  --output-pet-id native-pet-companion
+```
+
+Generate, ingest, review, validate, and preview the three jobs exactly as in the new-pet workflow. After every semantic review field is approved and bound to current frame hashes, package into a new directory:
+
+```bash
+python3 "$SKILL_DIR/scripts/companion_pet_assets.py" package-companion \
+  --run-dir /absolute/path/to/companion-run \
+  --source-pet-dir /absolute/path/to/native-pet \
+  --output-dir /absolute/path/to/native-pet-companion
+```
+
+The package command never overwrites the source or an existing output. It copies native rows 0-8 into a new Companion sheet, adds goal-complete, thinking, and talking at rows 9-11, and retains the original 11-row atlas byte-for-byte as `look-spritesheet.webp` so cursor-looking still uses the native near/far poses. A 9-row legacy source remains usable but cannot provide directional-look metadata.
+
+The result is a staged Companion-ready package, not an automatic installation. Install it to a new Companion pet directory only after package inspection and live playback verification.
+
+## Compact Mobile Presence
+
+Mobile presence packages are separate compact animations for the 48-point pet shown beside an active response. They contain idle, thinking, and talking only. Frame counts are variable per state, from 1-32 frames, and never change the desktop pet.
+
+Author mobile presence as a close-up portrait medallion, not a shrunken desktop sprite. Each frame shows one recognizable subject using a reference-appropriate head, upper-body, face, or equivalent focal crop. Do not invent ears, paws, limbs, or facial features that the source character does not have. Favor expressive gaze, blink, expression, mouth, or equivalent communication beats that remain readable inside the circular presentation.
+
+Keep presentation effects outside the atlas when the runtime clips the portrait to a medallion. A requested thinking bubble is a separate frame-based bitmap animation anchored just beyond the medallion, not a foreign object baked into the pet frame and not runtime-drawn SwiftUI geometry or material. It must appear only while the state is `thinking`, animate through a readable form/hold/idea/dissolve sequence, expose a stable poster frame under Reduced Motion, avoid covering response text, and disappear immediately when the state becomes talking, idle, or failed. The underlying thinking row still needs a coordinated focused character performance and may not merely replay idle or a cursor-look loop.
+
+Prepare direct mobile-scale candidates:
+
+```bash
+python3 "$SKILL_DIR/scripts/companion_pet_assets.py" prepare-mobile-presence \
+  --run-dir /absolute/path/to/mobile-presence-run \
+  --pet-id nova \
+  --display-name Nova \
+  --reference /absolute/path/to/nova-reference.png \
+  --cell-width 144 --cell-height 144 \
+  --state idle=12 --state thinking=12 --state talking=12
+```
+
+Generate each job directly at the declared compact cell size. Then use the existing `ingest`, `review-template`, `validate`, and `preview` commands. The mobile review profile checks a recognizable single-subject crop, correct reference-specific anatomy and identity details, stable portrait framing, and absence of unexpected body parts or components. Review every frame and loop seam at native scale; do not reuse a desktop strip or accept a mechanically resized version.
+
+Package only after the hash-bound semantic review passes:
+
+```bash
+python3 "$SKILL_DIR/scripts/companion_pet_assets.py" package-mobile-presence \
+  --run-dir /absolute/path/to/mobile-presence-run \
+  --output-dir /absolute/path/to/new-mobile-presence-package
+```
+
+The command writes `manifest.json`, `atlas.png`, and `thumbnail.png` through a temporary sibling followed by atomic promotion. It refuses existing output, cells over 256 pixels, atlases over 8192 pixels, states over 32 frames, duration/count mismatches, stale review hashes, invalid PNG transparency, incorrect SHA-256 values, and packages over 8 MiB. Generated candidates remain outside installed pet folders until review and validation pass.
+
+## Identity And Anatomy Gate
+
+Every accepted full-body desktop frame must preserve the source character's correct native anatomy and component count, with no extra, duplicated, merged, malformed, hidden-as-one, or cut-off parts. Every accepted mobile portrait frame uses a reference-appropriate compact crop and must not invent or remove identity-defining anatomy.
+
+Every accepted frame must also have:
+
+- the source pet's species or object type, face or focal details, applicable full-body silhouette or portrait crop, proportions, palette, markings, outline grammar, and reference-approved accessories;
+- identity-defining feature colors and placement whenever visible; a blink or pose change may occlude a feature but may not recolor or relocate it;
+- no magenta, labels, text, numbers, watermarks, guide marks, punctuation, UI, scenery, floor, opaque background, detached atlas effects, shadows, glow, blur, or slot crossing; a requested mobile thinking bubble is allowed only as a separate state-bound Companion presentation effect outside the clipped atlas;
 - one stable bottom-center anchor and consistent scale across the state's declared frame count;
 - lossless RGBA frame/row output, binary alpha, zero RGB under transparency, and nearest-neighbor scaling.
 
@@ -140,10 +198,11 @@ A validated row is not proof that the current runtime supports or displays that 
 
 | Mistake | Correction |
 | --- | --- |
-| Hardcoding 16 frames because an older Shadow used 16 | Use the state count in the copied runtime schema. |
+| Hardcoding 16 frames because an older package used 16 | Use the state count in the copied runtime schema. |
 | Treating all eight atlas cells as animated frames | Use the state's declared count; leave unused runtime cells transparent. |
 | Overwriting an old pet during migration | Build a new package and retain the source for rollback. |
 | Reusing another state as thinking or talking | Add a distinct runtime state or keep the candidate uninstalled. |
-| Counting alpha components as legs | Inspect anatomy manually in every frame. |
+| Baking a thought bubble into a clipped mobile frame or drawing it from SwiftUI circles/material | Keep the portrait atlas clean and render a dedicated bitmap effect animation outside the medallion only while `thinking`. |
+| Counting alpha components as valid anatomy | Inspect the reference-specific anatomy manually in every frame. |
 | Resizing poses independently | Use one global scale and a fixed bottom-center anchor. |
 | Accepting a green validator without playback | Inspect native frames, adjacent transitions, and the loop seam. |

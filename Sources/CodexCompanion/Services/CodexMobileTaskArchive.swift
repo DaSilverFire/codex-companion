@@ -98,6 +98,7 @@ struct CodexMobileTaskArchive: Sendable {
     }
 
     var homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    var lineageStore: CodexThreadLineageStore = CodexThreadLineageStore()
     var sqliteExecutableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
     var approvalPromotionTracker: CodexApprovalPromotionTracker = .shared
     var readPendingApprovalThreadIDs: @Sendable () -> Set<String> = {
@@ -107,12 +108,14 @@ struct CodexMobileTaskArchive: Sendable {
     func tasks(cursor: String?, limit requestedLimit: Int?) throws -> CodexMobileTaskPage {
         let limit = boundedLimit(requestedLimit, fallback: CompanionBridgeProtocol.defaultTaskPageSize)
         let offset = max(0, Int(cursor ?? "") ?? 0)
-        let pendingApprovalThreadIDs = readPendingApprovalThreadIDs()
+        let pendingApprovalThreadIDs = Set(readPendingApprovalThreadIDs().map {
+            lineageStore.canonicalThreadID(for: $0)
+        })
         let promotedThreadIDs = approvalPromotionTracker.promotedThreadIDs(
             pendingThreadIDs: pendingApprovalThreadIDs
         )
         let sidebarOrdering = CodexSidebarOrderingSnapshot.load(homeDirectory: homeDirectory)
-        let rows = try sqliteRows(query: """
+        let physicalRows = try sqliteRows(query: """
         select id, title, cwd, coalesce(updated_at_ms, updated_at * 1000),
                first_user_message, rollout_path, preview, coalesce(model, ''),
                coalesce(reasoning_effort, ''),
@@ -121,6 +124,7 @@ struct CodexMobileTaskArchive: Sendable {
         where archived = 0
           and source not like '{"subagent":%';
         """)
+        let rows = collapsedTaskRows(physicalRows)
 
         let sortedRows = rows.sorted { lhs, rhs in
             sidebarOrdering.orders(
@@ -186,6 +190,54 @@ struct CodexMobileTaskArchive: Sendable {
         )
     }
 
+    private func collapsedTaskRows(_ rows: [[String]]) -> [[String]] {
+        let grouped = Dictionary(grouping: rows.filter { $0.count >= 10 }) { columns in
+            lineageStore.canonicalThreadID(for: columns[0])
+        }
+        return grouped.map { canonicalThreadID, lineageRows in
+            let activeThreadID = lineageStore.activeThreadID(for: canonicalThreadID)
+            let activeRow = lineageRows.first { $0[0] == activeThreadID }
+                ?? lineageRows.max { lhs, rhs in
+                    (Double(lhs[9]) ?? 0) < (Double(rhs[9]) ?? 0)
+                }!
+            let canonicalRow = lineageRows.first { $0[0] == canonicalThreadID } ?? activeRow
+            var merged = activeRow
+            merged[0] = canonicalThreadID
+            merged[1] = canonicalRow[1]
+            merged[2] = canonicalRow[2]
+            merged[4] = canonicalRow[4]
+            if nonempty(merged[7]) == nil {
+                merged[7] = inheritedSetting(
+                    column: 7,
+                    canonicalThreadID: canonicalThreadID,
+                    rows: lineageRows
+                ) ?? ""
+            }
+            if nonempty(merged[8]) == nil {
+                merged[8] = inheritedSetting(
+                    column: 8,
+                    canonicalThreadID: canonicalThreadID,
+                    rows: lineageRows
+                ) ?? ""
+            }
+            return merged
+        }
+    }
+
+    private func inheritedSetting(
+        column: Int,
+        canonicalThreadID: String,
+        rows: [[String]]
+    ) -> String? {
+        let rowsByThreadID = Dictionary(uniqueKeysWithValues: rows.map { ($0[0], $0) })
+        let physicalThreadIDs = lineageStore.lineages()
+            .first { $0.canonicalThreadID == canonicalThreadID }?
+            .physicalThreadIDs ?? [canonicalThreadID]
+        return physicalThreadIDs.reversed().compactMap { threadID in
+            rowsByThreadID[threadID].flatMap { nonempty($0[column]) }
+        }.first
+    }
+
     private func taskStatus(
         needsApproval: Bool,
         lifecycle: TaskLifecycleState?,
@@ -239,7 +291,7 @@ struct CodexMobileTaskArchive: Sendable {
     ) throws -> CodexMobileMessagePage {
         let trimmedThreadID = threadID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedThreadID.isEmpty else { throw CodexMobileArchiveError.invalidThreadID }
-        guard let rolloutPath = try rolloutPath(for: trimmedThreadID) else {
+        guard let rolloutPath = try rolloutPath(for: runtimeThreadID(for: trimmedThreadID)) else {
             throw CodexMobileArchiveError.threadNotFound
         }
 
@@ -256,7 +308,7 @@ struct CodexMobileTaskArchive: Sendable {
     ) throws -> CodexMobileTaskAccountHandoffContext {
         let trimmedThreadID = threadID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedThreadID.isEmpty else { throw CodexMobileArchiveError.invalidThreadID }
-        guard let rolloutPath = try rolloutPath(for: trimmedThreadID) else {
+        guard let rolloutPath = try rolloutPath(for: runtimeThreadID(for: trimmedThreadID)) else {
             throw CodexMobileArchiveError.threadNotFound
         }
         let url = rolloutURL(from: rolloutPath)
@@ -276,7 +328,7 @@ struct CodexMobileTaskArchive: Sendable {
     ) throws -> CodexMobileTimelinePage {
         let trimmedThreadID = threadID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedThreadID.isEmpty else { throw CodexMobileArchiveError.invalidThreadID }
-        guard let rolloutPath = try rolloutPath(for: trimmedThreadID) else {
+        guard let rolloutPath = try rolloutPath(for: runtimeThreadID(for: trimmedThreadID)) else {
             throw CodexMobileArchiveError.threadNotFound
         }
 
@@ -348,9 +400,14 @@ struct CodexMobileTaskArchive: Sendable {
             return candidateThreadID
         }
 
-        let resolvedMainThreadID = mainThreadID(for: threadID)
+        let resolvedMainThreadID = lineageStore.canonicalThreadID(
+            for: mainThreadID(for: threadID)
+        )
         let family = parsed
-            .filter { mainThreadID(for: $0.0.id) == resolvedMainThreadID }
+            .filter {
+                lineageStore.canonicalThreadID(for: mainThreadID(for: $0.0.id))
+                    == resolvedMainThreadID
+            }
             .sorted { $0.2 > $1.2 }
             .prefix(limit)
             .map(\.0)
@@ -840,7 +897,7 @@ struct CodexMobileTaskArchive: Sendable {
         return (value as? NSNumber)?.intValue
     }
 
-    private func timelineItem(
+    func timelineItem(
         from data: Data,
         fallbackID: String
     ) -> CompanionBridgeTimelineItem? {
@@ -1128,6 +1185,14 @@ struct CodexMobileTaskArchive: Sendable {
         return try sqliteRows(query: """
         select rollout_path from threads where id = '\(escaped)' limit 1;
         """).first?.first
+    }
+
+    func runtimeThreadID(for threadID: String) -> String {
+        lineageStore.activeThreadID(for: threadID)
+    }
+
+    func canonicalThreadID(for threadID: String) -> String {
+        lineageStore.canonicalThreadID(for: threadID)
     }
 
     private func latestTaskRolloutState(in url: URL) -> LatestTaskRolloutState {

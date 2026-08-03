@@ -56,7 +56,8 @@ struct CodexThreadAccountHandoffTests {
         )
 
         #expect(result == CodexThreadAccountHandoffResult(
-            threadID: "thread-fork",
+            threadID: "thread-main",
+            runtimeThreadID: "thread-fork",
             rolloutURL: forkedRolloutURL.standardizedFileURL,
             profileID: profile.id
         ))
@@ -68,7 +69,8 @@ struct CodexThreadAccountHandoffTests {
         #expect(request.params["threadId"] as? String == "thread-main")
         #expect(request.params["excludeTurns"] as? Bool == true)
         #expect(request.params["deferGoalContinuation"] as? Bool == true)
-        #expect(bindings.profileID(for: "thread-main") == nil)
+        #expect(bindings.profileID(for: "thread-main") == profile.id)
+        #expect(bindings.profileID(forPhysicalThreadID: "thread-main") == nil)
         #expect(bindings.profileID(for: "thread-fork") == profile.id)
     }
 
@@ -119,7 +121,8 @@ struct CodexThreadAccountHandoffTests {
         #expect(rpc.recordedRequests.map(\.method) == ["account/read", "thread/fork"])
         let accountRequest = try #require(rpc.recordedRequests.first)
         #expect(accountRequest.params["refreshToken"] as? Bool == true)
-        #expect(bindings.profileID(for: "thread-main") == nil)
+        #expect(bindings.profileID(for: "thread-main") == profile.id)
+        #expect(bindings.profileID(forPhysicalThreadID: "thread-main") == nil)
         #expect(bindings.profileID(for: "thread-fork") == profile.id)
     }
 
@@ -330,7 +333,8 @@ struct CodexThreadAccountHandoffTests {
             email: "backup@example.com",
             planType: "pro"
         ))
-        #expect(bindings.profileID(for: "thread-main") == nil)
+        #expect(bindings.profileID(for: "thread-main") == profile.id)
+        #expect(bindings.profileID(forPhysicalThreadID: "thread-main") == nil)
         #expect(bindings.profileID(for: "thread-fork") == profile.id)
     }
 

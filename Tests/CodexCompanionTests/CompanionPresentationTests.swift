@@ -89,12 +89,12 @@ struct CompanionPresentationTests {
     }
 
     @Test
-    func failedProcessCardOffersReplyWithoutSteer() {
+    func failedProcessCardOffersRetryAndReplyWithoutSteer() {
         #expect(CompanionPresentationPolicy.processActions(
             status: .failed,
             isHovered: true,
             canTargetCodexThread: true
-        ) == [.reply])
+        ) == [.retry, .reply])
         #expect(CompanionPresentationPolicy.processActions(
             status: .failed,
             isHovered: false,
@@ -463,6 +463,46 @@ struct CompanionPresentationTests {
     }
 
     @Test
+    func physicalAccountForksCollapseIntoCanonicalDesktopTask() throws {
+        var source = Self.processItem(index: 1, goalStatus: nil)
+        source.id = "thread-source"
+        source.threadID = "source"
+        source.title = "User renamed task"
+        source.status = .completed
+        source.updatedAt = Date(timeIntervalSince1970: 100)
+        source.rolloutPath = "/tmp/source.jsonl"
+        var active = Self.processItem(index: 2, goalStatus: .blocked)
+        active.id = "thread-fork"
+        active.threadID = "fork"
+        active.title = "Original first prompt"
+        active.status = .waiting
+        active.updatedAt = Date(timeIntervalSince1970: 200)
+        active.rolloutPath = "/tmp/fork.jsonl"
+        active.runtimeStatus = .idle
+        active.goalObjective = "Preserve the goal"
+
+        let collapsed = CodexProcessStore.collapsingThreadLineages(
+            [source, active],
+            lineages: [CodexThreadLineage(
+                canonicalThreadID: "source",
+                activeThreadID: "fork",
+                physicalThreadIDs: ["source", "fork"]
+            )]
+        )
+        let task = try #require(collapsed.first)
+
+        #expect(collapsed.count == 1)
+        #expect(task.id == "thread-source")
+        #expect(task.threadID == "source")
+        #expect(task.title == "User renamed task")
+        #expect(task.status == .waiting)
+        #expect(task.rolloutPath == "/tmp/fork.jsonl")
+        #expect(task.runtimeStatus == .idle)
+        #expect(task.goalStatus == .blocked)
+        #expect(task.goalObjective == "Preserve the goal")
+    }
+
+    @Test
     func goalRefreshDoesNotEraseSharedApprovalState() throws {
         var item = Self.processItem(index: 1, goalStatus: nil)
         let threadID = try #require(item.threadID)
@@ -640,6 +680,45 @@ struct CompanionPresentationTests {
     }
 
     @Test
+    func processStatusBadgesExposeHumanReadableStateLabels() {
+        #expect(CompanionPresentationPolicy.processStatusLabel(for: .running) == "Still working")
+        #expect(CompanionPresentationPolicy.processStatusLabel(for: .completed) == "Completed")
+        #expect(CompanionPresentationPolicy.processStatusLabel(for: .failed) == "Failed or disconnected")
+        #expect(CompanionPresentationPolicy.processStatusLabel(for: .waiting) == "Needs your attention")
+    }
+
+    @Test
+    @MainActor
+    func runningIndicatorAnimatesOnlyItsCompositorLayer() {
+        let indicator = ProcessActivityIndicatorLayerView()
+        indicator.frame = CGRect(x: 0, y: 0, width: 14, height: 14)
+        indicator.layoutSubtreeIfNeeded()
+
+        indicator.setReducedMotion(false)
+        #expect(indicator.hasCompositorRotationAnimation)
+        #expect(indicator.rotationAnimationDuration == 0.9)
+
+        indicator.setReducedMotion(true)
+        #expect(!indicator.hasCompositorRotationAnimation)
+    }
+
+    @Test
+    func runningIndicatorHasAnExplicitSwiftUISizeBoundary() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(contentsOf: repositoryRoot
+            .appendingPathComponent("Sources/CodexCompanion/Views/QuickBarTrayView.swift"))
+
+        let lines = source.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        let indicatorLine = try #require(lines.firstIndex(of: "ProcessActivityIndicator()"))
+
+        #expect(lines[indicatorLine + 1] == ".frame(width: 14, height: 14)")
+    }
+
+    @Test
     func completedGoalKeepsItsSeparateThirtyMinutePresentationRule() {
         let now = Date(timeIntervalSince1970: 10_000)
         var goal = Self.processItem(index: 1, goalStatus: .complete)
@@ -734,16 +813,9 @@ struct CompanionPresentationTests {
             petWindowFrame.maxY - visibleAnchor.maxY
                 == PetWindowMetrics.trayBaselineDrop
         )
-        #expect(compactAnchor.minY == petWindowFrame.minY)
         #expect(
             compactAnchor.height
-                == petWindowFrame.height
-                    - PetWindowMetrics.trayBaselineDrop
-                    - PetWindowMetrics.trayControlRevealLift
-        )
-        #expect(
-            visibleAnchor.maxY - compactAnchor.maxY
-                == PetWindowMetrics.trayControlRevealLift
+                == visibleAnchor.height - PetWindowMetrics.trayControlRevealLift
         )
     }
 
@@ -773,18 +845,38 @@ struct CompanionPresentationTests {
                 visibleFrame: visibleFrame
             )
 
-            #expect(revealedOrigin.x == compactOrigin.x)
-            #expect(
-                revealedOrigin.y
-                    == petWindowFrame.maxY
-                        - PetWindowMetrics.trayBaselineDrop
-                        + PetWindowMetrics.trayGap
-            )
             #expect(
                 revealedOrigin.y - compactOrigin.y
                     == PetWindowMetrics.trayControlRevealLift
             )
         }
+    }
+
+    @Test
+    func processHoverResizeKeepsTheVisibleTrayOriginStable() {
+        let currentFrame = NSRect(x: 420, y: 220, width: 292, height: 94)
+        let visibleFrame = NSRect(x: 0, y: 0, width: 1_440, height: 900)
+        let resizedFrame = PetWindowMetrics.processHoverResizedTrayFrame(
+            currentFrame: currentFrame,
+            targetSize: CGSize(width: 292, height: 154),
+            visibleFrame: visibleFrame
+        )
+
+        #expect(resizedFrame.origin == currentFrame.origin)
+        #expect(resizedFrame.size == CGSize(width: 292, height: 154))
+    }
+
+    @Test
+    func processCardUsesInlineExpansionWithoutANativeHoverTooltip() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(contentsOf: repositoryRoot
+            .appendingPathComponent("Sources/CodexCompanion/Views/QuickBarTrayView.swift"))
+
+        #expect(!source.contains(".help(item.fullMessage)"))
+        #expect(source.contains(".accessibilityHint(Text(item.fullMessage))"))
     }
 
     @Test
@@ -937,7 +1029,7 @@ struct CompanionPresentationTests {
     }
 
     @Test
-    func targetableProcessCardExpandsOnlyForItsActionRow() {
+    func targetableProcessCardExpandsForLatestUpdateAndItsActionRow() {
         let item = Self.processItem(index: 1, goalStatus: .active)
         let collapsed = PetWindowMetrics.processRowHeight(
             for: item,
@@ -945,11 +1037,12 @@ struct CompanionPresentationTests {
         )
         let expanded = PetWindowMetrics.processRowHeight(
             for: item,
-            showsActions: true
+            showsActions: true,
+            showsExpandedMessage: true
         )
 
         #expect(collapsed == 72)
-        #expect(expanded == collapsed + 29)
+        #expect(expanded == collapsed + 29 + 28)
     }
 
     @Test
@@ -973,7 +1066,7 @@ struct CompanionPresentationTests {
     }
 
     @Test
-    func hoveringOneProcessExpandsTrayByOnlyThatActionRow() {
+    func hoveringOneProcessExpandsOnlyThatCardForItsLatestUpdateAndActions() {
         let items = (1...2).map { index in
             Self.processItem(index: index, goalStatus: .active)
         }
@@ -987,7 +1080,7 @@ struct CompanionPresentationTests {
             expandedProcessID: items[0].id
         )
 
-        #expect(expanded.height == collapsed.height + 29)
+        #expect(expanded.height == collapsed.height + 29 + 28)
     }
 
     @Test

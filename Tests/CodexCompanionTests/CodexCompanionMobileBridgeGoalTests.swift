@@ -48,6 +48,32 @@ struct CodexCompanionMobileBridgeGoalTests {
     }
 
     @Test
+    func canonicalTaskResumesGoalOnItsActivePhysicalFork() async throws {
+        let defaultsName = "CodexCompanionMobileBridgeGoalLineageTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        let lineages = CodexThreadLineageStore(defaults: defaults)
+        #expect(lineages.registerFork(
+            sourceThreadID: "canonical-thread",
+            destinationThreadID: "physical-fork"
+        ) == "canonical-thread")
+        let controller = RecordingGoalController(
+            goal: Self.goal(objective: "Resume across accounts", status: .active)
+        )
+        let server = CodexCompanionMobileBridgeServer(
+            archive: CodexMobileTaskArchive(lineageStore: lineages),
+            goalControlService: controller
+        )
+
+        let response = await server.handle(
+            CompanionBridgeRequest(operation: .resumeGoal, threadID: "canonical-thread")
+        )
+
+        #expect(response.succeeded)
+        #expect(controller.recordedCalls == [.resume(threadID: "physical-fork")])
+    }
+
+    @Test
     func updateGoalRoutesTheReplacementObjective() async {
         let controller = RecordingGoalController(
             goal: Self.goal(objective: "Changed objective", status: .blocked)

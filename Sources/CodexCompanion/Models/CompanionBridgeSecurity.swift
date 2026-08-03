@@ -41,13 +41,37 @@ struct CompanionBridgeEncryptedEnvelope: Codable, Equatable, Sendable {
 }
 
 struct CompanionBridgeReplayWindow: Sendable {
-    private var highestSequenceBySender: [String: UInt64] = [:]
+    private struct SenderState: Sendable {
+        var highestSequence: UInt64
+        var acceptedSequences: Set<UInt64>
+    }
+
+    private static let maximumReorderingDepth: UInt64 = 256
+    private var stateBySender: [String: SenderState] = [:]
 
     mutating func accept(sequence: UInt64, from senderID: String) -> Bool {
-        if let highest = highestSequenceBySender[senderID], sequence <= highest {
-            return false
+        guard var state = stateBySender[senderID] else {
+            stateBySender[senderID] = SenderState(
+                highestSequence: sequence,
+                acceptedSequences: [sequence]
+            )
+            return true
         }
-        highestSequenceBySender[senderID] = sequence
+
+        guard !state.acceptedSequences.contains(sequence) else { return false }
+        if sequence > state.highestSequence {
+            state.highestSequence = sequence
+        }
+        let earliestAccepted = state.highestSequence >= Self.maximumReorderingDepth - 1
+            ? state.highestSequence - (Self.maximumReorderingDepth - 1)
+            : 0
+        guard sequence >= earliestAccepted else { return false }
+
+        state.acceptedSequences.insert(sequence)
+        state.acceptedSequences = state.acceptedSequences.filter {
+            $0 >= earliestAccepted
+        }
+        stateBySender[senderID] = state
         return true
     }
 }
@@ -183,6 +207,14 @@ enum CompanionBridgeSecurity {
         secret: Data,
         as type: Value.Type
     ) throws -> Value {
+        let payload = try openData(envelope, secret: secret)
+        return try makeDecoder().decode(type, from: payload)
+    }
+
+    static func openData(
+        _ envelope: CompanionBridgeEncryptedEnvelope,
+        secret: Data
+    ) throws -> Data {
         guard secret.count >= 32 else { throw CompanionBridgeSecurityError.invalidSecret }
         guard envelope.version == envelopeVersion,
               envelope.channelID == channelID(secret: secret)
@@ -195,12 +227,11 @@ enum CompanionBridgeSecurity {
             sentAtMilliseconds: envelope.sentAtMilliseconds
         )
         let box = try ChaChaPoly.SealedBox(combined: envelope.sealedPayload)
-        let payload = try ChaChaPoly.open(
+        return try ChaChaPoly.open(
             box,
             using: SymmetricKey(data: secret),
             authenticating: try makeEncoder().encode(header)
         )
-        return try makeDecoder().decode(type, from: payload)
     }
 
     static func randomSecret() -> Data {
@@ -255,12 +286,15 @@ enum CompanionBridgeSecurity {
 
     private static func makeEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .millisecondsSince1970
         encoder.outputFormatting = [.sortedKeys]
         return encoder
     }
 
     private static func makeDecoder() -> JSONDecoder {
-        JSONDecoder()
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        return decoder
     }
 }
 

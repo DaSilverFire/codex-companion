@@ -46,4 +46,12 @@ See [RELEASING.md](RELEASING.md) for signing, notarization, update-feed, and pub
 
 ## Companion Pet Skill
 
-The repository includes `Skills/companion-pet`, a Codex skill for creating, validating, and updating animated pets for Codex Companion.
+The repository includes `Skills/companion-pet`, a schema-aware Codex skill for:
+
+- creating new Companion pets without assuming a species or fixed frame count;
+- auditing and upgrading an existing Codex pet without overwriting the original package;
+- adding Companion goal-complete, thinking, and talking animations;
+- authoring separate compact idle, thinking, and talking presence animations for mobile;
+- validating frame geometry, transparency, hashes, anatomy, identity, motion continuity, and loop seams before packaging.
+
+Release installers place the skill in `~/.codex/skills/companion-pet`. The repository does not bundle a personal pet package.

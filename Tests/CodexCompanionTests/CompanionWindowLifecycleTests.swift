@@ -227,6 +227,19 @@ struct CompanionWindowLifecycleTests {
     }
 
     @Test
+    func processHoverRefreshPreservesTheOpenTrayOrigin() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let windowSource = try String(contentsOf: root
+            .appendingPathComponent("Sources/CodexCompanion/Views/WindowConfigurator.swift"))
+
+        #expect(windowSource.contains("preservesCurrentOrigin: true"))
+        #expect(windowSource.contains("processHoverResizedTrayFrame"))
+    }
+
+    @Test
     func screenSpaceHoverFramesPreserveTheArrowToPetBridge() {
         let window = CGRect(x: 500, y: 300, width: 124, height: 164)
         let pet = PetWindowMetrics.petDragHandleScreenFrame(in: window)
@@ -303,6 +316,61 @@ struct CompanionWindowLifecycleTests {
 
         #expect(didResize)
         #expect(hostingView.frame.size == CGSize(width: 292, height: 240))
+    }
+
+    @Test @MainActor
+    func hoveringAProcessRequestsAnAppKitTrayResize() async throws {
+        let suiteName = "CompanionWindowLifecycleTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = CompanionAppModel(
+            petReactionCoordinator: PetReactionCoordinator(
+                generator: UnavailablePetReactionGenerator(),
+                defaults: defaults
+            ),
+            petVisibilityPreference: PetVisibilityPreference(defaults: defaults),
+            interactionPreferences: CompanionInteractionPreferences(defaults: defaults),
+            startsBackgroundServices: false
+        )
+        let observer = PetTrayHoverRefreshObserver()
+        var refreshCount = 0
+        observer.observe(model) {
+            refreshCount += 1
+        }
+
+        model.setProcessHovering("hovered-process", isHovering: true)
+        for _ in 0..<20 where refreshCount == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(refreshCount == 1)
+    }
+
+    @Test @MainActor
+    func transientProcessHoverExitIsCanceledByImmediateReentry() async throws {
+        let latch = ProcessHoverLatch(exitDelay: .milliseconds(40))
+        var changes: [Bool] = []
+
+        latch.update(isHovering: true) { changes.append($0) }
+        latch.update(isHovering: false) { changes.append($0) }
+        latch.update(isHovering: true) { changes.append($0) }
+        try await Task.sleep(for: .milliseconds(60))
+
+        #expect(changes == [true])
+    }
+
+    @Test @MainActor
+    func genuineProcessHoverExitStillCollapsesAfterTheTrackingAreaSettles() async throws {
+        let latch = ProcessHoverLatch(exitDelay: .milliseconds(20))
+        var changes: [Bool] = []
+
+        latch.update(isHovering: true) { changes.append($0) }
+        latch.update(isHovering: false) { changes.append($0) }
+        for _ in 0..<50 where changes.count < 2 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(changes == [true, false])
     }
 
     @Test @MainActor

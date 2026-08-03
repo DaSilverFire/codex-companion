@@ -608,7 +608,7 @@ struct CompanionAttentionTests {
     private static func waitForAttentionTitle(
         _ title: String,
         model: CompanionAppModel,
-        timeout: Duration = .seconds(1)
+        timeout: Duration = .seconds(3)
     ) async -> Bool {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)

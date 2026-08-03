@@ -9,6 +9,8 @@ enum CodexThreadSourceProfileResolutionError: Error, Equatable {
     case noMatchingProfile
     case ambiguousProfiles
     case bindingChanged
+    case missingExecutable
+    case profileRuntimeUnavailable
 }
 
 extension CodexThreadSourceProfileResolutionError: LocalizedError {
@@ -30,6 +32,10 @@ extension CodexThreadSourceProfileResolutionError: LocalizedError {
             return "More than one Companion profile represents the shared Codex account."
         case .bindingChanged:
             return "The task's account changed while Companion was identifying it."
+        case .missingExecutable:
+            return "The official Codex executable could not be found."
+        case .profileRuntimeUnavailable:
+            return "The selected Codex account service is not currently available."
         }
     }
 }
@@ -120,11 +126,17 @@ private struct UnavailableSharedAccountRuntimeRPCClient: CodexAppServerRPCPerfor
 final class CodexThreadSourceProfileResolver: @unchecked Sendable {
     typealias ProfilesProvider = @Sendable () -> [CodexAccountProfile]
     typealias SharedIdentityReader = @Sendable () throws -> CodexAccountProfileIdentity
+    typealias ExecutableURLsProvider = @Sendable () -> [URL]
+    typealias SocketProbe = @Sendable (URL) -> Bool
 
     private let profilesProvider: ProfilesProvider
     private let bindingStore: CodexThreadAccountProfileBindingStore
     private let identityStore: CodexAccountProfileIdentityStore
     private let sharedIdentityReader: SharedIdentityReader
+    private let executableURLsProvider: ExecutableURLsProvider
+    private let socketProbe: SocketProbe
+    private let daemonBaseURL: URL
+    private let sharedSQLiteHomeURL: URL
 
     init(
         profilesProvider: @escaping ProfilesProvider = {
@@ -136,12 +148,24 @@ final class CodexThreadSourceProfileResolver: @unchecked Sendable {
             CodexAccountProfileIdentityStore(),
         sharedIdentityReader: @escaping SharedIdentityReader = {
             try CodexSharedAccountRuntimeIdentityReader().identity()
-        }
+        },
+        executableURLsProvider: @escaping ExecutableURLsProvider = {
+            WorkspacePaths.codexExecutableURLs
+        },
+        socketProbe: @escaping SocketProbe = {
+            CodexAccountProfileDaemonCoordinator.socketIsReachable(at: $0)
+        },
+        daemonBaseURL: URL = CodexAccountProfileRuntime.defaultDaemonBaseURL,
+        sharedSQLiteHomeURL: URL = CodexAccountProfileRuntime.defaultSharedSQLiteHomeURL
     ) {
         self.profilesProvider = profilesProvider
         self.bindingStore = bindingStore
         self.identityStore = identityStore
         self.sharedIdentityReader = sharedIdentityReader
+        self.executableURLsProvider = executableURLsProvider
+        self.socketProbe = socketProbe
+        self.daemonBaseURL = daemonBaseURL
+        self.sharedSQLiteHomeURL = sharedSQLiteHomeURL
     }
 
     func resolveProfileID(for threadID: String) throws -> UUID {
@@ -184,5 +208,42 @@ final class CodexThreadSourceProfileResolver: @unchecked Sendable {
             "source-account bound thread=\(normalizedThreadID) profile=\(profile.id.uuidString) label=\(profile.label) account_type=\(sharedIdentity.accountType)"
         )
         return profile.id
+    }
+
+    func resolveTaskStreamEndpoint(for threadID: String) throws -> CodexTaskStreamEndpoint {
+        let profileID = try resolveProfileID(for: threadID)
+        guard let profile = profilesProvider().first(where: { $0.id == profileID }) else {
+            throw CodexThreadSourceProfileResolutionError.noMatchingProfile
+        }
+        guard let executableURL = executableURLsProvider().first(where: {
+            FileManager.default.isExecutableFile(atPath: $0.path)
+        }) else {
+            throw CodexThreadSourceProfileResolutionError.missingExecutable
+        }
+
+        let daemonHomeURL = CodexAccountProfileRuntime.daemonHomeURL(
+            for: profile,
+            baseURL: daemonBaseURL
+        )
+        let socketURL = daemonHomeURL
+            .appendingPathComponent("app-server-control", isDirectory: true)
+            .appendingPathComponent("app-server-control.sock")
+        guard socketProbe(socketURL) else {
+            CodexAccountRuntimeDiagnostics.append(
+                "task-stream unavailable thread=\(threadID) profile=\(profile.id.uuidString) reason=socket-unreachable"
+            )
+            throw CodexThreadSourceProfileResolutionError.profileRuntimeUnavailable
+        }
+
+        return CodexTaskStreamEndpoint(
+            profileID: profile.id,
+            executableURL: executableURL,
+            environmentOverrides: CodexAccountProfileRuntime.daemonTaskEnvironment(
+                for: profile,
+                daemonBaseURL: daemonBaseURL,
+                sharedSQLiteHomeURL: sharedSQLiteHomeURL
+            ),
+            socketURL: socketURL
+        )
     }
 }

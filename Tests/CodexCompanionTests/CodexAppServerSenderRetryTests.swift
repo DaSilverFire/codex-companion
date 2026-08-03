@@ -5,14 +5,30 @@ import Testing
 @Suite
 struct CodexAppServerSenderRetryTests {
     @Test
-    func loadedTaskRediscoversItsLiveTurnInsteadOfTrustingPreloadMetadata() {
+    func loadedTaskUsesItsLiveSnapshotWithoutHydratingTurnHistory() {
         #expect(CodexAppServerLoadedThreadRoutePlanner.nextStep(
             action: .steer,
-            snapshotTurnID: "turn-before-resume"
+            snapshotTurnID: "turn-live",
+            resumedThread: false
+        ) == .steerExistingTurn("turn-live"))
+        #expect(CodexAppServerLoadedThreadRoutePlanner.nextStep(
+            action: .reply,
+            snapshotTurnID: "turn-live",
+            resumedThread: false
+        ) == .queueReplyAfterCurrentTurn)
+    }
+
+    @Test
+    func resumedOrSnapshotlessTaskRediscoversItsCurrentTurn() {
+        #expect(CodexAppServerLoadedThreadRoutePlanner.nextStep(
+            action: .steer,
+            snapshotTurnID: "turn-before-resume",
+            resumedThread: true
         ) == .discoverCurrentTurn)
         #expect(CodexAppServerLoadedThreadRoutePlanner.nextStep(
             action: .reply,
-            snapshotTurnID: nil
+            snapshotTurnID: nil,
+            resumedThread: false
         ) == .discoverCurrentTurn)
     }
 
@@ -197,6 +213,96 @@ struct CodexAppServerSenderRetryTests {
         #expect(params["threadId"] as? String == "thread-exact")
         #expect(params["cwd"] as? String == "/tmp/exact-project")
         #expect(params["excludeTurns"] as? Bool == true)
+    }
+
+    @Test
+    func queuedReplyPollReadsTheExactTaskWithoutHydratingTurns() throws {
+        let request = CodexAppServerThreadReadRequestFactory.threadRead(
+            id: 5,
+            threadID: "thread-exact"
+        )
+        let params = try #require(request["params"] as? [String: Any])
+
+        #expect(request["id"] as? Int == 5)
+        #expect(request["method"] as? String == "thread/read")
+        #expect(params["threadId"] as? String == "thread-exact")
+        #expect(params["includeTurns"] as? Bool == false)
+    }
+
+    @Test
+    func exactThreadReadParsesIdleActiveAndUnavailableStates() {
+        let idle: [String: Any] = [
+            "result": [
+                "thread": [
+                    "id": "thread-exact",
+                    "status": ["type": "idle"],
+                ],
+            ],
+        ]
+        let active: [String: Any] = [
+            "result": [
+                "thread": [
+                    "id": "thread-exact",
+                    "status": ["type": "active", "activeFlags": []],
+                ],
+            ],
+        ]
+        let other: [String: Any] = [
+            "result": [
+                "thread": [
+                    "id": "thread-other",
+                    "status": ["type": "idle"],
+                ],
+            ],
+        ]
+
+        #expect(CodexAppServerResponseParser.threadReadState(
+            from: idle,
+            threadID: "thread-exact"
+        ) == .idle)
+        #expect(CodexAppServerResponseParser.threadReadState(
+            from: active,
+            threadID: "thread-exact"
+        ) == .active)
+        #expect(CodexAppServerResponseParser.threadReadState(
+            from: other,
+            threadID: "thread-exact"
+        ) == .unavailable)
+    }
+
+    @Test
+    func staleSteerRetriesOnceWithTheAuthoritativeActiveTurn() {
+        let message = "expected active turn id `turn-stale` but found `turn-current`"
+
+        #expect(CodexAppServerSteerRecoveryPolicy.replacementTurnID(
+            errorMessage: message,
+            attemptedTurnID: "turn-stale",
+            hasRetried: false
+        ) == "turn-current")
+        #expect(CodexAppServerSteerRecoveryPolicy.replacementTurnID(
+            errorMessage: message,
+            attemptedTurnID: "turn-stale",
+            hasRetried: true
+        ) == nil)
+        #expect(CodexAppServerSteerRecoveryPolicy.replacementTurnID(
+            errorMessage: message,
+            attemptedTurnID: "turn-other",
+            hasRetried: false
+        ) == nil)
+    }
+
+    @Test
+    func malformedActiveTurnErrorsNeverTriggerSteerRecovery() {
+        #expect(CodexAppServerSteerRecoveryPolicy.replacementTurnID(
+            errorMessage: "active turn changed",
+            attemptedTurnID: "turn-stale",
+            hasRetried: false
+        ) == nil)
+        #expect(CodexAppServerSteerRecoveryPolicy.replacementTurnID(
+            errorMessage: "expected active turn id `turn-stale` but found `turn-stale`",
+            attemptedTurnID: "turn-stale",
+            hasRetried: false
+        ) == nil)
     }
 
     @Test

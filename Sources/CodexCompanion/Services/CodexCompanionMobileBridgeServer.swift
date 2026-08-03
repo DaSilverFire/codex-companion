@@ -36,6 +36,43 @@ typealias CompanionThreadAccountHandoffSubmitter = @Sendable (
     _ profile: CodexAccountProfile
 ) throws -> CodexThreadAccountHandoffResult
 
+struct CompanionBridgeRequestContext: @unchecked Sendable {
+    var deviceID: String?
+    var nearbyPeer: MCPeerID?
+    var relayGeneration: UUID?
+
+    init(
+        deviceID: String? = nil,
+        nearbyPeer: MCPeerID? = nil,
+        relayGeneration: UUID? = nil
+    ) {
+        self.deviceID = deviceID
+        self.nearbyPeer = nearbyPeer
+        self.relayGeneration = relayGeneration
+    }
+}
+
+typealias CompanionNearbyLiveEventSender = @Sendable (
+    _ event: CompanionBridgeServerEvent,
+    _ deviceID: String
+) -> Bool
+
+typealias CompanionRelayLiveEventSender = @Sendable (
+    _ event: CompanionBridgeServerEvent,
+    _ deviceID: String,
+    _ generation: UUID?
+) async -> Bool
+
+typealias CompanionNearbyResponseSender = @Sendable (
+    _ response: CompanionBridgeResponse,
+    _ context: CompanionBridgeRequestContext
+) -> Bool
+
+typealias CompanionRelayResponseSender = @Sendable (
+    _ response: CompanionBridgeResponse,
+    _ context: CompanionBridgeRequestContext
+) async -> Bool
+
 final class CodexCompanionMobileBridgeServer: NSObject {
     static let subagentHistoryLimit = CompanionBridgeProtocol.maximumPageSize
 
@@ -78,8 +115,15 @@ final class CodexCompanionMobileBridgeServer: NSObject {
     private let threadAccountHandoffSubmitter: CompanionThreadAccountHandoffSubmitter
     private let accountProfileUsageReader: CompanionAccountProfileUsageReader
     private let accountProfileResetConsumer: CompanionAccountProfileResetConsumer
+    private let taskStreamBroker: any CodexTaskStreamBrokerServing
+    private let presencePetCatalogService: CompanionPresencePetCatalogService
+    private let attachmentUploadStore: CompanionIncomingAttachmentUploadStore
+    private let nearbyLiveEventSenderOverride: CompanionNearbyLiveEventSender?
+    private let relayLiveEventSenderOverride: CompanionRelayLiveEventSender?
+    private let nearbyResponseSenderOverride: CompanionNearbyResponseSender?
+    private let relayResponseSenderOverride: CompanionRelayResponseSender?
     private let historyLoadCoordinator = CompanionHistoryLoadCoordinator()
-    private let createTaskRequestCoordinator = CompanionBridgeRequestCoordinator()
+    private let idempotentRequestCoordinator = CompanionBridgeRequestCoordinator()
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private let pairingCoordinator: CompanionPairingCoordinator
@@ -146,7 +190,14 @@ final class CodexCompanionMobileBridgeServer: NSObject {
                 creditID: creditID,
                 idempotencyKey: idempotencyKey
             )
-        }
+        },
+        taskStreamBroker: (any CodexTaskStreamBrokerServing)? = nil,
+        presencePetCatalogService: CompanionPresencePetCatalogService = CompanionPresencePetCatalogService(),
+        attachmentUploadStore: CompanionIncomingAttachmentUploadStore = CompanionIncomingAttachmentUploadStore(),
+        nearbyLiveEventSender: CompanionNearbyLiveEventSender? = nil,
+        relayLiveEventSender: CompanionRelayLiveEventSender? = nil,
+        nearbyResponseSender: CompanionNearbyResponseSender? = nil,
+        relayResponseSender: CompanionRelayResponseSender? = nil
     ) {
         let computerName = Host.current().localizedName?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -176,6 +227,36 @@ final class CodexCompanionMobileBridgeServer: NSObject {
         }
         self.accountProfileUsageReader = accountProfileUsageReader
         self.accountProfileResetConsumer = accountProfileResetConsumer
+        let taskStreamArchive = archive
+        self.taskStreamBroker = taskStreamBroker ?? CodexTaskStreamBroker(
+            clientFactory: { threadID in
+                do {
+                    let context = try taskStreamArchive.accountHandoffContext(
+                        threadID: threadID
+                    )
+                    CodexAccountRuntimeDiagnostics.append(
+                        "task-stream source=rollout-tail thread=\(threadID)"
+                    )
+                    return CodexRolloutTaskEventClient(
+                        rolloutURL: context.rolloutURL,
+                        hasActiveTurn: context.hasActiveTurn
+                    )
+                } catch {
+                    let endpoint = try CodexThreadSourceProfileResolver()
+                        .resolveTaskStreamEndpoint(for: threadID)
+                    CodexAccountRuntimeDiagnostics.append(
+                        "task-stream source=profile-daemon-fallback thread=\(threadID)"
+                    )
+                    return CodexAppServerTaskEventClient(endpoint: endpoint)
+                }
+            }
+        )
+        self.presencePetCatalogService = presencePetCatalogService
+        self.attachmentUploadStore = attachmentUploadStore
+        nearbyLiveEventSenderOverride = nearbyLiveEventSender
+        relayLiveEventSenderOverride = relayLiveEventSender
+        nearbyResponseSenderOverride = nearbyResponseSender
+        relayResponseSenderOverride = relayResponseSender
         encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .millisecondsSince1970
         decoder = JSONDecoder()
@@ -202,6 +283,7 @@ final class CodexCompanionMobileBridgeServer: NSObject {
     }
 
     func stop() {
+        Task { await taskStreamBroker.stop() }
         let shouldStop = lifecycleLock.withLock {
             guard isRunning else { return false }
             isRunning = false
@@ -252,19 +334,23 @@ final class CodexCompanionMobileBridgeServer: NSObject {
                 return
             }
             Task {
-                let response = await self.handle(request, pairingPeer: peer)
-                self.send(response, to: peer)
+                let context = self.requestContext(for: peer)
+                let response = await self.handle(
+                    request,
+                    context: context
+                )
+                await self.deliverResponse(response, context: context)
             }
         }
     }
 
     func handle(_ request: CompanionBridgeRequest) async -> CompanionBridgeResponse {
-        await handle(request, pairingPeer: nil)
+        await handle(request, context: CompanionBridgeRequestContext())
     }
 
-    private func handle(
+    func handle(
         _ request: CompanionBridgeRequest,
-        pairingPeer: MCPeerID?
+        context: CompanionBridgeRequestContext
     ) async -> CompanionBridgeResponse {
         guard request.protocolVersion == CompanionBridgeProtocol.version else {
             return .failure(
@@ -276,7 +362,7 @@ final class CodexCompanionMobileBridgeServer: NSObject {
 
         do {
             if request.operation != .handshake,
-               let pairingPeer,
+               let pairingPeer = context.nearbyPeer,
                isPairing(pairingPeer) {
                 return .failure(
                     for: request,
@@ -286,24 +372,31 @@ final class CodexCompanionMobileBridgeServer: NSObject {
             }
             switch request.operation {
             case .handshake:
-                if let pairingPeer,
+                let presencePets = await presencePetCatalogService.refresh()
+                if let pairingPeer = context.nearbyPeer,
                    let invitation = pendingPairing(pairingPeer) {
                     let record = try pairingCoordinator.completePairing(invitation)
-                    markAuthorized(pairingPeer, deviceID: record.deviceID)
+                    authorize(pairingPeer, deviceID: record.deviceID)
                     synchronizeRelayConnections()
                     return .success(
                         for: request,
                         macName: peerID.displayName,
                         macDeviceID: macDeviceID,
                         pairingSecret: record.secret,
-                        relayURLString: CompanionRelaySettings.configuredURL()?.absoluteString
+                        relayURLString: CompanionRelaySettings.configuredURL()?.absoluteString,
+                        features: [.taskStreamV1, .presencePetPackageV1, .attachmentUploadV1],
+                        selectedDesktopPetID: presencePets.selectedDesktopPetID,
+                        presencePetCatalog: presencePets.catalog
                     )
                 }
                 return .success(
                     for: request,
                     macName: peerID.displayName,
                     macDeviceID: macDeviceID,
-                    relayURLString: CompanionRelaySettings.configuredURL()?.absoluteString
+                    relayURLString: CompanionRelaySettings.configuredURL()?.absoluteString,
+                    features: [.taskStreamV1, .presencePetPackageV1, .attachmentUploadV1],
+                    selectedDesktopPetID: presencePets.selectedDesktopPetID,
+                    presencePetCatalog: presencePets.catalog
                 )
             case .listTasks:
                 let page = try archive.tasks(cursor: request.cursor, limit: request.limit)
@@ -316,9 +409,16 @@ final class CodexCompanionMobileBridgeServer: NSObject {
                     task.accountProfileLabel = accountProfileProvider(profileID)?.label
                     return task
                 }
-                let goals = (try? goalControlService.readGoals(
-                    threadIDs: accountAnnotatedTasks.map(\.id)
+                let runtimeThreadIDsByTaskID = Dictionary(uniqueKeysWithValues:
+                    accountAnnotatedTasks.map { ($0.id, archive.runtimeThreadID(for: $0.id)) }
+                )
+                let runtimeGoals = (try? goalControlService.readGoals(
+                    threadIDs: Array(Set(runtimeThreadIDsByTaskID.values))
                 )) ?? [:]
+                var goals: [String: CodexGoalSnapshot?] = [:]
+                for (taskID, runtimeThreadID) in runtimeThreadIDsByTaskID {
+                    goals.updateValue(runtimeGoals[runtimeThreadID] ?? nil, forKey: taskID)
+                }
                 return .success(
                     for: request,
                     tasks: Self.attachingGoals(goals, to: accountAnnotatedTasks),
@@ -379,11 +479,20 @@ final class CodexCompanionMobileBridgeServer: NSObject {
                     contextUsage: snapshot.contextUsage
                 )
             case .sendMessage:
-                return await sendMessage(request)
+                return await idempotentRequestCoordinator.response(for: request.id) { [weak self] in
+                    guard let self else {
+                        return .failure(
+                            for: request,
+                            code: "bridge_stopped",
+                            message: "Codex Companion stopped before the message could be sent."
+                        )
+                    }
+                    return await self.sendMessage(request, context: context)
+                }
             case .respondToApproval:
                 return await respondToApproval(request)
             case .createTask:
-                return await createTaskRequestCoordinator.response(for: request.id) { [weak self] in
+                return await idempotentRequestCoordinator.response(for: request.id) { [weak self] in
                     guard let self else {
                         return .failure(
                             for: request,
@@ -391,7 +500,7 @@ final class CodexCompanionMobileBridgeServer: NSObject {
                             message: "Codex Companion stopped before the task could be created."
                         )
                     }
-                    return await self.createTask(request)
+                    return await self.createTask(request, context: context)
                 }
             case .switchTaskAccount:
                 return switchTaskAccount(request)
@@ -399,7 +508,7 @@ final class CodexCompanionMobileBridgeServer: NSObject {
                 let capabilities = try capabilityService.load(cwd: request.cwd)
                 return .success(for: request, capabilities: capabilities)
             case .sendCasualChat:
-                return await sendCasualChat(request)
+                return await sendCasualChat(request, context: context)
             case .loadUsage:
                 return loadUsage(request)
             case .consumeUsageReset:
@@ -410,6 +519,20 @@ final class CodexCompanionMobileBridgeServer: NSObject {
                 return resumeGoal(request)
             case .updateGoal:
                 return updateGoal(request)
+            case .subscribeTaskStream:
+                return await subscribeTaskStream(request, context: context)
+            case .unsubscribeTaskStream:
+                return await unsubscribeTaskStream(request, context: context)
+            case .beginAttachmentUpload:
+                return await beginAttachmentUpload(request, context: context)
+            case .uploadAttachmentChunk:
+                return await uploadAttachmentChunk(request, context: context)
+            case .cancelAttachmentUpload:
+                return await cancelAttachmentUpload(request, context: context)
+            case .loadPresencePetManifest:
+                return await loadPresencePetManifest(request)
+            case .loadPresencePetChunk:
+                return await loadPresencePetChunk(request)
             }
         } catch {
             return .failure(
@@ -420,16 +543,322 @@ final class CodexCompanionMobileBridgeServer: NSObject {
         }
     }
 
-    private func sendCasualChat(_ request: CompanionBridgeRequest) async -> CompanionBridgeResponse {
+    private func beginAttachmentUpload(
+        _ request: CompanionBridgeRequest,
+        context: CompanionBridgeRequestContext
+    ) async -> CompanionBridgeResponse {
+        guard let deviceID = context.deviceID,
+              let uploadID = request.attachmentUploadID,
+              let attachmentID = request.attachmentID,
+              let kind = request.attachmentKind,
+              let filename = request.attachmentFilename,
+              let byteCount = request.attachmentByteCount
+        else {
+            return .failure(
+                for: request,
+                code: "invalid_attachment_upload",
+                message: "The attachment upload metadata is incomplete."
+            )
+        }
+        let attachment = CompanionBridgeAttachment(
+            id: attachmentID,
+            kind: kind,
+            filename: filename,
+            mimeType: request.attachmentMimeType,
+            data: Data(),
+            byteCount: byteCount,
+            uploadID: uploadID
+        )
+        do {
+            let progress = try await attachmentUploadStore.begin(
+                uploadID: uploadID,
+                attachment: attachment,
+                deviceID: deviceID
+            )
+            return .success(for: request, attachmentUploadProgress: progress)
+        } catch {
+            return attachmentUploadFailure(for: request, error: error)
+        }
+    }
+
+    private func uploadAttachmentChunk(
+        _ request: CompanionBridgeRequest,
+        context: CompanionBridgeRequestContext
+    ) async -> CompanionBridgeResponse {
+        guard let deviceID = context.deviceID,
+              let uploadID = request.attachmentUploadID,
+              let offset = request.attachmentChunkOffset,
+              let data = request.attachmentChunkData
+        else {
+            return .failure(
+                for: request,
+                code: "invalid_attachment_upload",
+                message: "The attachment transfer chunk is incomplete."
+            )
+        }
+        do {
+            let progress = try await attachmentUploadStore.append(
+                uploadID: uploadID,
+                deviceID: deviceID,
+                offset: offset,
+                data: data
+            )
+            return .success(for: request, attachmentUploadProgress: progress)
+        } catch {
+            return attachmentUploadFailure(for: request, error: error)
+        }
+    }
+
+    private func cancelAttachmentUpload(
+        _ request: CompanionBridgeRequest,
+        context: CompanionBridgeRequestContext
+    ) async -> CompanionBridgeResponse {
+        guard let deviceID = context.deviceID,
+              let uploadID = request.attachmentUploadID
+        else {
+            return .failure(
+                for: request,
+                code: "invalid_attachment_upload",
+                message: "The attachment upload identifier is missing."
+            )
+        }
+        do {
+            try await attachmentUploadStore.cancel(uploadID: uploadID, deviceID: deviceID)
+            return .success(for: request, message: "Attachment upload cancelled.")
+        } catch {
+            return attachmentUploadFailure(for: request, error: error)
+        }
+    }
+
+    private func attachmentUploadFailure(
+        for request: CompanionBridgeRequest,
+        error: Error
+    ) -> CompanionBridgeResponse {
+        .failure(
+            for: request,
+            code: "invalid_attachment_upload",
+            message: error.localizedDescription
+        )
+    }
+
+    private func loadPresencePetManifest(
+        _ request: CompanionBridgeRequest
+    ) async -> CompanionBridgeResponse {
+        guard
+            let packageID = request.presencePetPackageID?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            !packageID.isEmpty,
+            let contentHash = request.presencePetContentHash?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            !contentHash.isEmpty
+        else {
+            return .failure(
+                for: request,
+                code: "invalid_presence_pet_request",
+                message: "Choose a Companion pet package first."
+            )
+        }
+        do {
+            let manifest = try await presencePetCatalogService.manifest(
+                packageID: packageID,
+                contentHash: contentHash
+            )
+            return .success(for: request, presencePetManifest: manifest)
+        } catch {
+            return presencePetFailure(for: request, error: error)
+        }
+    }
+
+    private func loadPresencePetChunk(
+        _ request: CompanionBridgeRequest
+    ) async -> CompanionBridgeResponse {
+        guard
+            let packageID = request.presencePetPackageID?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            !packageID.isEmpty,
+            let contentHash = request.presencePetContentHash?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            !contentHash.isEmpty,
+            let fileName = request.presencePetFileName?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            !fileName.isEmpty,
+            let offset = request.presencePetOffset,
+            let length = request.presencePetLength
+        else {
+            return .failure(
+                for: request,
+                code: "invalid_presence_pet_request",
+                message: "The Companion pet download request is incomplete."
+            )
+        }
+        do {
+            let chunk = try await presencePetCatalogService.chunk(
+                packageID: packageID,
+                contentHash: contentHash,
+                fileName: fileName,
+                offset: offset,
+                requestedLength: length
+            )
+            return .success(for: request, presencePetChunk: chunk)
+        } catch {
+            return presencePetFailure(for: request, error: error)
+        }
+    }
+
+    private func presencePetFailure(
+        for request: CompanionBridgeRequest,
+        error: Error
+    ) -> CompanionBridgeResponse {
+        let catalogError = error as? CompanionPresencePetCatalogError
+        let code: String
+        switch catalogError {
+        case .unknownPackage, .invalidPackage:
+            code = "presence_pet_not_found"
+        case .staleContentHash:
+            code = "stale_presence_pet"
+        case .invalidFileName, .unsafePath:
+            code = "invalid_presence_pet_file"
+        case .invalidRange:
+            code = "invalid_presence_pet_range"
+        case nil:
+            code = "presence_pet_unavailable"
+        }
+        return .failure(
+            for: request,
+            code: code,
+            message: error.localizedDescription
+        )
+    }
+
+    private func subscribeTaskStream(
+        _ request: CompanionBridgeRequest,
+        context: CompanionBridgeRequestContext
+    ) async -> CompanionBridgeResponse {
+        guard let deviceID = context.deviceID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !deviceID.isEmpty
+        else {
+            return .failure(
+                for: request,
+                code: "unauthorized_device",
+                message: "Pair this iPhone with Codex Companion before streaming a task."
+            )
+        }
+        guard let threadID = request.threadID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !threadID.isEmpty
+        else {
+            return .failure(
+                for: request,
+                code: "missing_thread",
+                message: "Choose a task first."
+            )
+        }
+        guard let subscriptionID = request.subscriptionID else {
+            return .failure(
+                for: request,
+                code: "missing_subscription",
+                message: "The task stream request is incomplete."
+            )
+        }
+
+        let canonicalThreadID = archive.canonicalThreadID(for: threadID)
+        let runtimeThreadID = archive.runtimeThreadID(for: threadID)
+        do {
+            let acceptedID = try await taskStreamBroker.subscribe(
+                deviceID: deviceID,
+                threadID: runtimeThreadID,
+                subscriptionID: subscriptionID,
+                onEvent: { [weak self] event in
+                    var event = event
+                    event.threadID = canonicalThreadID
+                    await self?.sendLiveEvent(
+                        event,
+                        deviceID: deviceID,
+                        relayGeneration: context.relayGeneration
+                    )
+                }
+            )
+            return .success(
+                for: request,
+                message: "Live task updates connected.",
+                threadID: canonicalThreadID,
+                subscriptionID: acceptedID
+            )
+        } catch {
+            return .failure(
+                for: request,
+                code: "stream_unavailable",
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private func unsubscribeTaskStream(
+        _ request: CompanionBridgeRequest,
+        context: CompanionBridgeRequestContext
+    ) async -> CompanionBridgeResponse {
+        guard let deviceID = context.deviceID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !deviceID.isEmpty
+        else {
+            return .failure(
+                for: request,
+                code: "unauthorized_device",
+                message: "Pair this iPhone with Codex Companion before changing a task stream."
+            )
+        }
+        guard let subscriptionID = request.streamID ?? request.subscriptionID else {
+            return .failure(
+                for: request,
+                code: "missing_subscription",
+                message: "The task stream request is incomplete."
+            )
+        }
+
+        await taskStreamBroker.unsubscribe(
+            deviceID: deviceID,
+            subscriptionID: subscriptionID
+        )
+        return .success(
+            for: request,
+            message: "Live task updates disconnected.",
+            subscriptionID: subscriptionID
+        )
+    }
+
+    private func sendCasualChat(
+        _ request: CompanionBridgeRequest,
+        context: CompanionBridgeRequestContext
+    ) async -> CompanionBridgeResponse {
         let text = request.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let attachments = request.attachments ?? []
-        guard !text.isEmpty || !attachments.isEmpty else {
+        let requestedAttachments = request.attachments ?? []
+        guard !text.isEmpty || !requestedAttachments.isEmpty else {
             return .failure(for: request, code: "invalid_message", message: "Enter a message first.")
         }
 
         let provider = request.chatProvider ?? .onDevice
+        if !requestedAttachments.isEmpty, provider != .onDevice {
+            let providerName = provider == .openAIAPI ? "OpenAI API" : "Lumo API"
+            return .failure(
+                for: request,
+                code: "chat_attachments_unsupported",
+                message: "\(providerName) chat does not support Companion attachments yet. Choose On-device or remove the attachment."
+            )
+        }
+        let attachments: [CompanionBridgeAttachment]
         do {
-            try CompanionIncomingAttachmentStore.validate(attachments)
+            attachments = try await resolveCasualChatAttachments(
+                requestedAttachments,
+                requestID: request.id,
+                context: context
+            )
+        } catch {
+            return .failure(
+                for: request,
+                code: "invalid_attachment",
+                message: error.localizedDescription
+            )
+        }
+        var liveSequence: UInt64 = 0
+        do {
             let agent = CompanionBridgeChatAgent.builtIns.first {
                 $0.id == request.chatAgentID
             } ?? CompanionBridgeChatAgent.builtIns[0]
@@ -441,21 +870,15 @@ final class CodexCompanionMobileBridgeServer: NSObject {
             \(text)
             """
 
-            let answer: String
+            let stream: AsyncThrowingStream<CompanionChatStreamEvent, Error>
             switch provider {
             case .onDevice:
-                answer = try await onDeviceChatService.send(
+                stream = onDeviceChatService.stream(
                     prompt: prompt,
-                    attachments: attachments
+                    attachments: attachments,
+                    authorizationMode: .remoteClient
                 )
             case .openAIAPI:
-                guard attachments.isEmpty else {
-                    return .failure(
-                        for: request,
-                        code: "chat_attachments_unsupported",
-                        message: "OpenAI API chat does not support Companion attachments yet. Choose On-device or remove the attachment."
-                    )
-                }
                 guard let apiKey = openAIAPIKeyProvider() else {
                     return .failure(
                         for: request,
@@ -464,19 +887,12 @@ final class CodexCompanionMobileBridgeServer: NSObject {
                     )
                 }
                 let model = request.chatModelID.flatMap(ChatGPTModel.init(rawValue:)) ?? .gpt56Luna
-                answer = try await openAIChatService.send(
+                stream = openAIChatService.stream(
                     prompt: prompt,
                     model: model,
                     apiKey: apiKey
-                ).text
+                )
             case .lumoAPI:
-                guard attachments.isEmpty else {
-                    return .failure(
-                        for: request,
-                        code: "chat_attachments_unsupported",
-                        message: "Lumo API chat does not support Companion attachments yet. Choose On-device or remove the attachment."
-                    )
-                }
                 guard let apiKey = lumoAPIKeyProvider() else {
                     return .failure(
                         for: request,
@@ -485,32 +901,120 @@ final class CodexCompanionMobileBridgeServer: NSObject {
                     )
                 }
                 let model = request.chatModelID.flatMap(LumoModel.init(rawValue:)) ?? .automatic
-                answer = try await lumoChatService.send(
+                stream = lumoChatService.stream(
                     prompt: prompt,
                     model: model,
                     apiKey: apiKey
-                ).text
+                )
+            }
+
+            let streamID = request.streamID
+            let deviceID = context.deviceID?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let canPublishLiveEvents = streamID != nil && deviceID?.isEmpty == false
+            let turnID = request.id.uuidString
+            let itemID = "casual-chat-assistant-\(turnID)"
+            var completion: CompanionChatStreamCompletion?
+
+            for try await event in stream {
+                let liveEvent: CompanionBridgeLiveEvent?
+                switch event {
+                case .started:
+                    liveSequence += 1
+                    liveEvent = CompanionBridgeLiveEvent(
+                        channel: .casualChat,
+                        streamID: streamID ?? request.id,
+                        sequence: liveSequence,
+                        turnID: turnID,
+                        kind: .turnStarted
+                    )
+                case .assistantDelta(let delta):
+                    liveSequence += 1
+                    liveEvent = CompanionBridgeLiveEvent(
+                        channel: .casualChat,
+                        streamID: streamID ?? request.id,
+                        sequence: liveSequence,
+                        turnID: turnID,
+                        itemID: itemID,
+                        kind: .assistantDelta,
+                        text: delta
+                    )
+                case .completed(let finalCompletion):
+                    completion = finalCompletion
+                    liveSequence += 1
+                    liveEvent = CompanionBridgeLiveEvent(
+                        channel: .casualChat,
+                        streamID: streamID ?? request.id,
+                        sequence: liveSequence,
+                        turnID: turnID,
+                        itemID: itemID,
+                        kind: .turnCompleted
+                    )
+                }
+
+                if canPublishLiveEvents,
+                   let liveEvent,
+                   let deviceID {
+                    await sendLiveEvent(
+                        liveEvent,
+                        deviceID: deviceID,
+                        relayGeneration: context.relayGeneration
+                    )
+                }
+            }
+
+            guard let completion else {
+                throw CompanionChatStreamError.missingCompletion
             }
             return .success(
                 for: request,
                 chatMessage: CompanionBridgeMessage(
                     id: UUID().uuidString,
                     role: .assistant,
-                    text: answer,
+                    text: completion.text,
                     createdAt: Date()
                 )
             )
         } catch {
             let errorCode: String
+            let errorMessage: String
             switch provider {
-            case .onDevice: errorCode = "on_device_chat_unavailable"
-            case .openAIAPI: errorCode = "openai_chat_unavailable"
-            case .lumoAPI: errorCode = "lumo_chat_unavailable"
+            case .onDevice:
+                let presentation = OnDeviceChatFailurePolicy.bridgePresentation(
+                    for: error
+                )
+                errorCode = presentation.code
+                errorMessage = presentation.message
+            case .openAIAPI:
+                errorCode = "openai_chat_unavailable"
+                errorMessage = error.localizedDescription
+            case .lumoAPI:
+                errorCode = "lumo_chat_unavailable"
+                errorMessage = error.localizedDescription
+            }
+            if let streamID = request.streamID,
+               let deviceID = context.deviceID?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+               !deviceID.isEmpty {
+                liveSequence += 1
+                await sendLiveEvent(
+                    CompanionBridgeLiveEvent(
+                        channel: .casualChat,
+                        streamID: streamID,
+                        sequence: liveSequence,
+                        turnID: request.id.uuidString,
+                        kind: .failed,
+                        text: errorMessage,
+                        errorCode: errorCode
+                    ),
+                    deviceID: deviceID,
+                    relayGeneration: context.relayGeneration
+                )
             }
             return .failure(
                 for: request,
                 code: errorCode,
-                message: error.localizedDescription
+                message: errorMessage
             )
         }
     }
@@ -564,14 +1068,16 @@ final class CodexCompanionMobileBridgeServer: NSObject {
 
         do {
             let context = try archive.accountHandoffContext(threadID: threadID)
+            let sourceRuntimeThreadID = archive.runtimeThreadID(for: threadID)
             let result = try threadAccountHandoffSubmitter(
                 threadID,
                 context.rolloutURL,
                 context.hasActiveTurn,
                 profile
             )
-            guard result.threadID != threadID,
-                  !result.threadID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            guard !result.threadID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  result.runtimeThreadID != sourceRuntimeThreadID,
+                  !result.runtimeThreadID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   result.profileID == profile.id,
                   result.rolloutURL.standardizedFileURL
                     != context.rolloutURL.standardizedFileURL
@@ -579,12 +1085,12 @@ final class CodexCompanionMobileBridgeServer: NSObject {
                 return .failure(
                     for: request,
                     code: "account_handoff_mismatch",
-                    message: "Codex did not create the expected destination task, so the account was not changed."
+                    message: "Codex did not create the expected runtime continuation, so the account was not changed."
                 )
             }
             return .success(
                 for: request,
-                message: "Task continued with \(profile.label) as a new task.",
+                message: "Task continued with \(profile.label).",
                 threadID: result.threadID,
                 accountProfileID: profile.id,
                 accountProfileLabel: profile.label
@@ -706,7 +1212,7 @@ final class CodexCompanionMobileBridgeServer: NSObject {
 
         do {
             let goal = try goalControlService.createGoal(
-                threadID: threadID,
+                threadID: archive.runtimeThreadID(for: threadID),
                 objective: objective,
                 tokenBudget: request.goalTokenBudget
             )
@@ -732,7 +1238,9 @@ final class CodexCompanionMobileBridgeServer: NSObject {
         }
 
         do {
-            let goal = try goalControlService.resumeGoal(threadID: threadID)
+            let goal = try goalControlService.resumeGoal(
+                threadID: archive.runtimeThreadID(for: threadID)
+            )
             return .success(
                 for: request,
                 message: "Goal resumed.",
@@ -762,7 +1270,7 @@ final class CodexCompanionMobileBridgeServer: NSObject {
 
         do {
             let goal = try goalControlService.updateGoal(
-                threadID: threadID,
+                threadID: archive.runtimeThreadID(for: threadID),
                 objective: objective
             )
             return .success(
@@ -791,7 +1299,10 @@ final class CodexCompanionMobileBridgeServer: NSObject {
         }
     }
 
-    private func sendMessage(_ request: CompanionBridgeRequest) async -> CompanionBridgeResponse {
+    private func sendMessage(
+        _ request: CompanionBridgeRequest,
+        context: CompanionBridgeRequestContext
+    ) async -> CompanionBridgeResponse {
         guard let threadID = request.threadID?.trimmingCharacters(in: .whitespacesAndNewlines),
               !threadID.isEmpty,
               let text = request.text?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -800,26 +1311,32 @@ final class CodexCompanionMobileBridgeServer: NSObject {
             return .failure(for: request, code: "invalid_message", message: "Enter a message first.")
         }
         let action: CodexSendAction = request.sendAction == .steer ? .steer : .reply
+        let runtimeThreadID = archive.runtimeThreadID(for: threadID)
         let task = try? archive.tasks(cursor: nil, limit: CompanionBridgeProtocol.maximumPageSize)
             .tasks.first(where: { $0.id == threadID })
         let model = request.model?.trimmingCharacters(in: .whitespacesAndNewlines)
         let reasoningEffort = request.reasoningEffort?.trimmingCharacters(in: .whitespacesAndNewlines)
         var retainedCurrentSettings = false
         if model?.isEmpty == false || reasoningEffort?.isEmpty == false {
-            let settingsOutcome = await threadSettingsUpdater(threadID, model, reasoningEffort)
+            let settingsOutcome = await threadSettingsUpdater(
+                runtimeThreadID,
+                model,
+                reasoningEffort
+            )
             if settingsOutcome != .sent {
                 retainedCurrentSettings = true
                 CodexSendLog.append(
-                    "mobile bridge retained current task settings thread=\(threadID) "
+                    "mobile bridge retained current task settings thread=\(runtimeThreadID) "
                         + "outcome=\(String(describing: settingsOutcome))"
                 )
             }
         }
         let stagedAttachments: [CodexFollowerAttachment]
         do {
-            stagedAttachments = try CompanionIncomingAttachmentStore().stage(
+            stagedAttachments = try await stageTaskAttachments(
                 request.attachments ?? [],
-                requestID: request.id
+                requestID: request.id,
+                context: context
             )
         } catch {
             return .failure(
@@ -830,10 +1347,10 @@ final class CodexCompanionMobileBridgeServer: NSObject {
         }
         let outcome = await taskMessageSender(
             text,
-            threadID,
+            runtimeThreadID,
             request.cwd ?? task?.cwd,
             action,
-            task?.activeTurnID,
+            request.expectedTurnID ?? task?.activeTurnID,
             request.clientMessageID,
             stagedAttachments
         )
@@ -878,7 +1395,7 @@ final class CodexCompanionMobileBridgeServer: NSObject {
         case .decline: decision = .decline
         }
         let outcome = await CodexAppServerApprovalSender().respond(
-            threadID: threadID,
+            threadID: archive.runtimeThreadID(for: threadID),
             decision: decision
         )
         switch outcome {
@@ -901,7 +1418,10 @@ final class CodexCompanionMobileBridgeServer: NSObject {
         }
     }
 
-    private func createTask(_ request: CompanionBridgeRequest) async -> CompanionBridgeResponse {
+    private func createTask(
+        _ request: CompanionBridgeRequest,
+        context: CompanionBridgeRequestContext
+    ) async -> CompanionBridgeResponse {
         guard let prompt = request.text?.trimmingCharacters(in: .whitespacesAndNewlines),
               !prompt.isEmpty
         else {
@@ -909,9 +1429,10 @@ final class CodexCompanionMobileBridgeServer: NSObject {
         }
         let stagedAttachments: [CodexFollowerAttachment]
         do {
-            stagedAttachments = try CompanionIncomingAttachmentStore().stage(
+            stagedAttachments = try await stageTaskAttachments(
                 request.attachments ?? [],
-                requestID: request.id
+                requestID: request.id,
+                context: context
             )
         } catch {
             return .failure(
@@ -932,6 +1453,81 @@ final class CodexCompanionMobileBridgeServer: NSObject {
             clientMessageID: request.clientMessageID
         )
         return Self.createTaskResponse(for: request, outcome: outcome)
+    }
+
+    private func stageTaskAttachments(
+        _ attachments: [CompanionBridgeAttachment],
+        requestID: UUID,
+        context: CompanionBridgeRequestContext
+    ) async throws -> [CodexFollowerAttachment] {
+        guard Set(attachments.map(\.id)).count == attachments.count else {
+            throw CompanionIncomingAttachmentUploadError.invalidUpload
+        }
+        let uploaded = attachments.filter { $0.uploadID != nil }
+        let inline = attachments.filter { $0.uploadID == nil }
+        var staged = try CompanionIncomingAttachmentStore().stage(
+            inline,
+            requestID: requestID
+        )
+        if !uploaded.isEmpty {
+            guard let deviceID = context.deviceID else {
+                throw CompanionIncomingAttachmentUploadError.unauthorizedUpload
+            }
+            staged.append(contentsOf: try await attachmentUploadStore.stage(
+                uploaded,
+                requestID: requestID,
+                deviceID: deviceID
+            ))
+        }
+        let stagedByID = Dictionary(uniqueKeysWithValues: staged.map { ($0.id, $0) })
+        return attachments.compactMap { stagedByID[$0.id] }
+    }
+
+    private func resolveCasualChatAttachments(
+        _ attachments: [CompanionBridgeAttachment],
+        requestID: UUID,
+        context: CompanionBridgeRequestContext
+    ) async throws -> [CompanionBridgeAttachment] {
+        guard Set(attachments.map(\.id)).count == attachments.count else {
+            throw CompanionIncomingAttachmentUploadError.invalidUpload
+        }
+        let uploaded = attachments.filter { $0.uploadID != nil }
+        let inline = attachments.filter { $0.uploadID == nil }
+        try CompanionIncomingAttachmentStore.validate(inline)
+
+        var resolvedByID = Dictionary(uniqueKeysWithValues: inline.map { ($0.id, $0) })
+        if !uploaded.isEmpty {
+            guard let deviceID = context.deviceID else {
+                throw CompanionIncomingAttachmentUploadError.unauthorizedUpload
+            }
+            let staged = try await attachmentUploadStore.stage(
+                uploaded,
+                requestID: requestID,
+                deviceID: deviceID
+            )
+            let stagedByID = Dictionary(uniqueKeysWithValues: staged.map { ($0.id, $0) })
+            for attachment in uploaded {
+                guard let stagedAttachment = stagedByID[attachment.id] else {
+                    throw CompanionIncomingAttachmentUploadError.invalidUpload
+                }
+                resolvedByID[attachment.id] = CompanionBridgeAttachment(
+                    id: attachment.id,
+                    kind: attachment.kind,
+                    filename: attachment.filename,
+                    mimeType: attachment.mimeType,
+                    data: Data(),
+                    byteCount: attachment.payloadByteCount,
+                    uploadID: attachment.uploadID,
+                    localFileURL: URL(fileURLWithPath: stagedAttachment.path)
+                )
+            }
+        }
+        return try attachments.map { attachment in
+            guard let resolved = resolvedByID[attachment.id] else {
+                throw CompanionIncomingAttachmentUploadError.invalidUpload
+            }
+            return resolved
+        }
     }
 
     static func createTaskResponse(
@@ -966,12 +1562,97 @@ final class CodexCompanionMobileBridgeServer: NSObject {
         }
     }
 
-    private func send(_ response: CompanionBridgeResponse, to peer: MCPeerID) {
+    private func sendLiveEvent(
+        _ liveEvent: CompanionBridgeLiveEvent,
+        deviceID: String,
+        relayGeneration: UUID?
+    ) async {
+        let serverEvent = CompanionBridgeServerEvent(liveEvent: liveEvent)
+        let sentNearby: Bool
+        if let nearbyLiveEventSenderOverride {
+            sentNearby = nearbyLiveEventSenderOverride(serverEvent, deviceID)
+        } else {
+            sentNearby = sendNearbyLiveEvent(serverEvent, deviceID: deviceID)
+        }
+        guard !sentNearby else { return }
+
+        if let relayLiveEventSenderOverride {
+            _ = await relayLiveEventSenderOverride(
+                serverEvent,
+                deviceID,
+                relayGeneration
+            )
+        } else {
+            _ = await sendRelayLiveEvent(
+                serverEvent,
+                deviceID: deviceID,
+                generation: relayGeneration
+            )
+        }
+    }
+
+    private func sendNearbyLiveEvent(
+        _ event: CompanionBridgeServerEvent,
+        deviceID: String
+    ) -> Bool {
+        guard let peer = session.connectedPeers.first(where: {
+            authorizedDeviceID(for: $0) == deviceID
+        }) else { return false }
+
+        do {
+            let eventEncoder = JSONEncoder()
+            eventEncoder.dateEncodingStrategy = .millisecondsSince1970
+            let data = try eventEncoder.encode(event)
+            try session.send(data, toPeers: [peer], with: .reliable)
+            return true
+        } catch {
+            CodexSendLog.append(
+                "mobile bridge live event failed peer=\(peer.displayName) error=\(error.localizedDescription)"
+            )
+            return false
+        }
+    }
+
+    private func sendRelayLiveEvent(
+        _ event: CompanionBridgeServerEvent,
+        deviceID: String,
+        generation: UUID?
+    ) async -> Bool {
+        let endpoint = relayLock.withLock { relayEndpointsByDeviceID[deviceID] }
+        guard let endpoint,
+              generation == nil || endpoint.generation == generation
+        else { return false }
+
+        do {
+            let channelID = CompanionBridgeSecurity.channelID(secret: endpoint.record.secret)
+            let sequence = relaySequenceStore.next(
+                channelID: channelID,
+                senderID: macDeviceID
+            )
+            let envelope = try CompanionBridgeSecurity.seal(
+                event,
+                secret: endpoint.record.secret,
+                senderID: macDeviceID,
+                sequence: sequence
+            )
+            try await endpoint.connection.send(envelope)
+            return true
+        } catch {
+            CodexSendLog.append(
+                "mobile relay live event failed device=\(deviceID) error=\(error.localizedDescription)"
+            )
+            return false
+        }
+    }
+
+    private func send(_ response: CompanionBridgeResponse, to peer: MCPeerID) -> Bool {
         do {
             let data = try encoder.encode(response)
             try session.send(data, toPeers: [peer], with: .reliable)
+            return true
         } catch {
             CodexSendLog.append("mobile bridge response failed peer=\(peer.displayName) error=\(error.localizedDescription)")
+            return false
         }
     }
 
@@ -1176,18 +1857,84 @@ final class CodexCompanionMobileBridgeServer: NSObject {
 
         Task { [weak self] in
             guard let self else { return }
-            let response = await self.handle(request, pairingPeer: nil)
-            await self.sendRelay(response, deviceID: deviceID, generation: generation)
+            let context = CompanionBridgeRequestContext(
+                deviceID: deviceID,
+                relayGeneration: generation
+            )
+            let response = await self.handle(
+                request,
+                context: context
+            )
+            await self.deliverResponse(response, context: context)
         }
+    }
+
+    func deliverResponse(
+        _ response: CompanionBridgeResponse,
+        context: CompanionBridgeRequestContext
+    ) async {
+        if context.nearbyPeer != nil {
+            if sendNearbyResponse(response, context: context) { return }
+            CodexSendLog.append(
+                "mobile bridge response fallback nearby-to-relay operation="
+                    + response.operation.rawValue
+            )
+            if await sendRelayResponse(response, context: context) { return }
+        } else {
+            if await sendRelayResponse(response, context: context) { return }
+            CodexSendLog.append(
+                "mobile bridge response fallback relay-to-nearby operation="
+                    + response.operation.rawValue
+            )
+            if sendNearbyResponse(response, context: context) { return }
+        }
+
+        CodexSendLog.append(
+            "mobile bridge response unavailable operation=" + response.operation.rawValue
+        )
+    }
+
+    private func sendNearbyResponse(
+        _ response: CompanionBridgeResponse,
+        context: CompanionBridgeRequestContext
+    ) -> Bool {
+        if let nearbyResponseSenderOverride {
+            return nearbyResponseSenderOverride(response, context)
+        }
+
+        let peer = context.nearbyPeer ?? context.deviceID.flatMap { deviceID in
+            session.connectedPeers.first(where: {
+                authorizedDeviceID(for: $0) == deviceID
+            })
+        }
+        guard let peer, session.connectedPeers.contains(peer) else { return false }
+        return send(response, to: peer)
+    }
+
+    private func sendRelayResponse(
+        _ response: CompanionBridgeResponse,
+        context: CompanionBridgeRequestContext
+    ) async -> Bool {
+        if let relayResponseSenderOverride {
+            return await relayResponseSenderOverride(response, context)
+        }
+        guard let deviceID = context.deviceID else { return false }
+        return await sendRelay(
+            response,
+            deviceID: deviceID,
+            generation: context.relayGeneration
+        )
     }
 
     private func sendRelay(
         _ response: CompanionBridgeResponse,
         deviceID: String,
-        generation: UUID
-    ) async {
+        generation: UUID?
+    ) async -> Bool {
         let endpoint = relayLock.withLock { relayEndpointsByDeviceID[deviceID] }
-        guard let endpoint, endpoint.generation == generation else { return }
+        guard let endpoint,
+              generation == nil || endpoint.generation == generation
+        else { return false }
         do {
             let channelID = CompanionBridgeSecurity.channelID(secret: endpoint.record.secret)
             let sequence = relaySequenceStore.next(
@@ -1205,10 +1952,12 @@ final class CodexCompanionMobileBridgeServer: NSObject {
                 "mobile relay response operation=\(response.operation.rawValue) "
                     + "succeeded=\(response.succeeded)"
             )
+            return true
         } catch {
             CodexSendLog.append(
                 "mobile relay response failed device=\(deviceID) error=\(error.localizedDescription)"
             )
+            return false
         }
     }
 
@@ -1227,10 +1976,23 @@ final class CodexCompanionMobileBridgeServer: NSObject {
         authorizationLock.withLock { pendingPairingByPeerName[peer.displayName] }
     }
 
-    private func markAuthorized(_ peer: MCPeerID, deviceID: String) {
+    func authorize(_ peer: MCPeerID, deviceID: String) {
         authorizationLock.withLock {
             pendingPairingByPeerName.removeValue(forKey: peer.displayName)
             authorizedDeviceIDByPeerName[peer.displayName] = deviceID
+        }
+    }
+
+    func requestContext(for peer: MCPeerID) -> CompanionBridgeRequestContext {
+        CompanionBridgeRequestContext(
+            deviceID: authorizedDeviceID(for: peer),
+            nearbyPeer: peer
+        )
+    }
+
+    private func authorizedDeviceID(for peer: MCPeerID) -> String? {
+        authorizationLock.withLock {
+            authorizedDeviceIDByPeerName[peer.displayName]
         }
     }
 
@@ -1272,7 +2034,7 @@ extension CodexCompanionMobileBridgeServer: MCNearbyServiceAdvertiserDelegate {
         let decision = pairingCoordinator.invitationDecision(invitation)
         switch decision {
         case .acceptTrusted:
-            markAuthorized(peerID, deviceID: invitation.deviceID)
+            authorize(peerID, deviceID: invitation.deviceID)
             invitationHandler(true, session)
             CodexSendLog.append("mobile bridge accepted trusted device=\(invitation.deviceID)")
         case .acceptPairing:

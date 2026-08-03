@@ -8,11 +8,26 @@ struct CompanionSettingsPresentationTests {
     func settingsUseFocusedNativeTabs() {
         #expect(CompanionSettingsTab.allCases.map(\.title) == [
             "General",
+            "Accounts",
             "Chat",
             "Mobile",
             "Updates",
         ])
-        #expect(Set(CompanionSettingsTab.allCases.map(\.systemImage)).count == 4)
+        #expect(Set(CompanionSettingsTab.allCases.map(\.systemImage)).count == 5)
+    }
+
+    @Test
+    func accountProfilesHaveADedicatedSettingsDestination() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(contentsOf: root
+            .appendingPathComponent("Sources/CodexCompanion/Views/SettingsView.swift"))
+
+        #expect(source.contains("accountSettings"))
+        #expect(source.contains("CompanionSettingsTab.accounts"))
+        #expect(source.contains("private var accountSettings: some View"))
     }
 
     @Test

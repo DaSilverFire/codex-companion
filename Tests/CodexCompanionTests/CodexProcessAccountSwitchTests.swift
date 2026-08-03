@@ -76,7 +76,8 @@ struct CodexProcessAccountSwitchTests {
                     profile: selectedProfile
                 )
                 return CodexThreadAccountHandoffResult(
-                    threadID: "thread-1-fork",
+                    threadID: "thread-1",
+                    runtimeThreadID: "thread-1-fork",
                     rolloutURL: URL(fileURLWithPath: "/tmp/task-fork.jsonl"),
                     profileID: selectedProfile.id
                 )
@@ -94,7 +95,7 @@ struct CodexProcessAccountSwitchTests {
         #expect(invocation?.hasActiveTurn == false)
         #expect(invocation?.profile == profile)
         #expect(model.accountHandoffError == nil)
-        #expect(model.status == "Task continued with Backup as a new task.")
+        #expect(model.status == "Task continued with Backup.")
     }
 
     @Test

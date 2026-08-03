@@ -192,6 +192,69 @@ struct CodexThreadSourceProfileResolverTests {
         #expect(bindings.profileID(for: "thread-1") == backup.id)
     }
 
+    @Test
+    func taskStreamEndpointUsesTheBoundProfilesExistingDaemonSocket() throws {
+        let defaultsName = "CodexThreadSourceProfileResolverEndpointTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        let profile = CodexAccountProfile(id: UUID(), label: "Main")
+        let bindings = CodexThreadAccountProfileBindingStore(defaults: defaults)
+        bindings.bind(threadID: "thread-1", to: profile.id)
+        let daemonBaseURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sqliteHomeURL = daemonBaseURL.appendingPathComponent("shared-sqlite", isDirectory: true)
+        let executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        let expectedSocketURL = CodexAccountProfileRuntime.daemonHomeURL(
+            for: profile,
+            baseURL: daemonBaseURL
+        )
+        .appendingPathComponent("app-server-control", isDirectory: true)
+        .appendingPathComponent("app-server-control.sock")
+        let resolver = CodexThreadSourceProfileResolver(
+            profilesProvider: { [profile] },
+            bindingStore: bindings,
+            sharedIdentityReader: {
+                Issue.record("A bound task must not re-read the shared account identity")
+                throw CodexThreadSourceProfileResolutionError.unverifiableAccountIdentity
+            },
+            executableURLsProvider: { [executableURL] },
+            socketProbe: { $0 == expectedSocketURL },
+            daemonBaseURL: daemonBaseURL,
+            sharedSQLiteHomeURL: sqliteHomeURL
+        )
+
+        let endpoint = try resolver.resolveTaskStreamEndpoint(for: "thread-1")
+
+        #expect(endpoint.profileID == profile.id)
+        #expect(endpoint.executableURL == executableURL)
+        #expect(endpoint.socketURL == expectedSocketURL)
+        #expect(endpoint.environmentOverrides["CODEX_HOME"] == expectedSocketURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .path)
+        #expect(endpoint.environmentOverrides["CODEX_SQLITE_HOME"] == sqliteHomeURL.path)
+    }
+
+    @Test
+    func taskStreamEndpointRefusesToStartOrRepairAnUnreachableProfileRuntime() throws {
+        let defaultsName = "CodexThreadSourceProfileResolverUnavailableTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        let profile = CodexAccountProfile(id: UUID(), label: "Main")
+        let bindings = CodexThreadAccountProfileBindingStore(defaults: defaults)
+        bindings.bind(threadID: "thread-1", to: profile.id)
+        let resolver = CodexThreadSourceProfileResolver(
+            profilesProvider: { [profile] },
+            bindingStore: bindings,
+            executableURLsProvider: { [URL(fileURLWithPath: "/usr/bin/true")] },
+            socketProbe: { _ in false }
+        )
+
+        #expect(throws: CodexThreadSourceProfileResolutionError.profileRuntimeUnavailable) {
+            try resolver.resolveTaskStreamEndpoint(for: "thread-1")
+        }
+    }
+
     private static func accountResponse(email: String) -> CodexRPCResponse {
         CodexRPCResponse(
             result: [

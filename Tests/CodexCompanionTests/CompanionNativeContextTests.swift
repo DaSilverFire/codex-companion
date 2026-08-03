@@ -100,4 +100,20 @@ struct CompanionNativeContextTests {
             ).contains("No incomplete reminders")
         )
     }
+
+    @Test
+    func remoteAuthorizationErrorsStayInChatInsteadOfOpeningMacDialogs() {
+        #expect(!OnDeviceChatAuthorizationMode.remoteClient.allowsSystemAuthorizationPrompt)
+        #expect(OnDeviceChatAuthorizationMode.interactiveMac.allowsSystemAuthorizationPrompt)
+        #expect(
+            CompanionPersonalContextError.calendarAuthorizationRequired
+                .localizedDescription
+                .contains("Mac")
+        )
+        #expect(
+            CompanionPersonalContextError.locationAuthorizationRequired
+                .localizedDescription
+                .contains("mobile")
+        )
+    }
 }

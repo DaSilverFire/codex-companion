@@ -1,5 +1,25 @@
 import Foundation
 
+enum CompanionBridgeDateCoding {
+    static var tolerantDecodingStrategy: JSONDecoder.DateDecodingStrategy {
+        .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let raw = try container.decode(Double.self)
+
+            if raw >= 100_000_000_000 {
+                return Date(timeIntervalSince1970: raw / 1_000)
+            }
+            if raw >= 1_500_000_000 {
+                return Date(timeIntervalSince1970: raw)
+            }
+            if raw >= 100_000_000 {
+                return Date(timeIntervalSinceReferenceDate: raw)
+            }
+            return Date(timeIntervalSince1970: raw / 1_000)
+        }
+    }
+}
+
 enum CompanionBridgeProtocol {
     static let version = 1
     static let serviceType = "codex-companion"
@@ -23,6 +43,13 @@ enum CompanionBridgeOperation: String, Codable, Sendable {
     case createGoal
     case resumeGoal
     case updateGoal
+    case subscribeTaskStream
+    case unsubscribeTaskStream
+    case beginAttachmentUpload
+    case uploadAttachmentChunk
+    case cancelAttachmentUpload
+    case loadPresencePetManifest
+    case loadPresencePetChunk
 }
 
 enum CompanionBridgeSendAction: String, Codable, CaseIterable, Sendable {
@@ -121,25 +148,77 @@ enum CompanionBridgeAttachmentKind: String, Codable, Sendable {
     case image
 }
 
+struct CompanionAttachmentUploadProgress: Codable, Equatable, Sendable {
+    var nextOffset: Int64
+    var isComplete: Bool
+}
+
 struct CompanionBridgeAttachment: Codable, Equatable, Identifiable, Sendable {
     var id: UUID
     var kind: CompanionBridgeAttachmentKind
     var filename: String
     var mimeType: String?
     var data: Data
+    var byteCount: Int64
+    var uploadID: UUID?
+    var localFileURL: URL?
 
     init(
         id: UUID = UUID(),
         kind: CompanionBridgeAttachmentKind,
         filename: String,
         mimeType: String? = nil,
-        data: Data
+        data: Data,
+        byteCount: Int64? = nil,
+        uploadID: UUID? = nil,
+        localFileURL: URL? = nil
     ) {
         self.id = id
         self.kind = kind
         self.filename = filename
         self.mimeType = mimeType
         self.data = data
+        self.byteCount = byteCount ?? Int64(data.count)
+        self.uploadID = uploadID
+        self.localFileURL = localFileURL
+    }
+
+    var payloadByteCount: Int64 {
+        max(byteCount, Int64(data.count))
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case filename
+        case mimeType
+        case data
+        case byteCount
+        case uploadID
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        kind = try values.decode(CompanionBridgeAttachmentKind.self, forKey: .kind)
+        filename = try values.decode(String.self, forKey: .filename)
+        mimeType = try values.decodeIfPresent(String.self, forKey: .mimeType)
+        data = try values.decodeIfPresent(Data.self, forKey: .data) ?? Data()
+        byteCount = try values.decodeIfPresent(Int64.self, forKey: .byteCount)
+            ?? Int64(data.count)
+        uploadID = try values.decodeIfPresent(UUID.self, forKey: .uploadID)
+        localFileURL = nil
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id)
+        try values.encode(kind, forKey: .kind)
+        try values.encode(filename, forKey: .filename)
+        try values.encodeIfPresent(mimeType, forKey: .mimeType)
+        try values.encode(data, forKey: .data)
+        try values.encode(payloadByteCount, forKey: .byteCount)
+        try values.encodeIfPresent(uploadID, forKey: .uploadID)
     }
 }
 
@@ -155,6 +234,7 @@ struct CompanionBridgeRequest: Codable, Equatable, Sendable {
     var text: String?
     var cwd: String?
     var sendAction: CompanionBridgeSendAction?
+    var expectedTurnID: String?
     var approvalDecision: CompanionBridgeApprovalDecision?
     var model: String?
     var reasoningEffort: String?
@@ -167,6 +247,21 @@ struct CompanionBridgeRequest: Codable, Equatable, Sendable {
     var resetCreditID: String?
     var attachments: [CompanionBridgeAttachment]?
     var idempotencyKey: UUID?
+    var subscriptionID: UUID?
+    var streamID: UUID?
+    var attachmentUploadID: UUID?
+    var attachmentID: UUID?
+    var attachmentKind: CompanionBridgeAttachmentKind?
+    var attachmentFilename: String?
+    var attachmentMimeType: String?
+    var attachmentByteCount: Int64?
+    var attachmentChunkOffset: Int64?
+    var attachmentChunkData: Data?
+    var presencePetPackageID: String?
+    var presencePetContentHash: String?
+    var presencePetFileName: String?
+    var presencePetOffset: Int?
+    var presencePetLength: Int?
 
     init(
         id: UUID = UUID(),
@@ -179,6 +274,7 @@ struct CompanionBridgeRequest: Codable, Equatable, Sendable {
         text: String? = nil,
         cwd: String? = nil,
         sendAction: CompanionBridgeSendAction? = nil,
+        expectedTurnID: String? = nil,
         approvalDecision: CompanionBridgeApprovalDecision? = nil,
         model: String? = nil,
         reasoningEffort: String? = nil,
@@ -190,7 +286,22 @@ struct CompanionBridgeRequest: Codable, Equatable, Sendable {
         accountProfileID: UUID? = nil,
         resetCreditID: String? = nil,
         attachments: [CompanionBridgeAttachment]? = nil,
-        idempotencyKey: UUID? = nil
+        idempotencyKey: UUID? = nil,
+        subscriptionID: UUID? = nil,
+        streamID: UUID? = nil,
+        attachmentUploadID: UUID? = nil,
+        attachmentID: UUID? = nil,
+        attachmentKind: CompanionBridgeAttachmentKind? = nil,
+        attachmentFilename: String? = nil,
+        attachmentMimeType: String? = nil,
+        attachmentByteCount: Int64? = nil,
+        attachmentChunkOffset: Int64? = nil,
+        attachmentChunkData: Data? = nil,
+        presencePetPackageID: String? = nil,
+        presencePetContentHash: String? = nil,
+        presencePetFileName: String? = nil,
+        presencePetOffset: Int? = nil,
+        presencePetLength: Int? = nil
     ) {
         self.id = id
         self.operation = operation
@@ -202,6 +313,7 @@ struct CompanionBridgeRequest: Codable, Equatable, Sendable {
         self.text = text
         self.cwd = cwd
         self.sendAction = sendAction
+        self.expectedTurnID = expectedTurnID
         self.approvalDecision = approvalDecision
         self.model = model
         self.reasoningEffort = reasoningEffort
@@ -214,6 +326,21 @@ struct CompanionBridgeRequest: Codable, Equatable, Sendable {
         self.resetCreditID = resetCreditID
         self.attachments = attachments
         self.idempotencyKey = idempotencyKey
+        self.subscriptionID = subscriptionID
+        self.streamID = streamID
+        self.attachmentUploadID = attachmentUploadID
+        self.attachmentID = attachmentID
+        self.attachmentKind = attachmentKind
+        self.attachmentFilename = attachmentFilename
+        self.attachmentMimeType = attachmentMimeType
+        self.attachmentByteCount = attachmentByteCount
+        self.attachmentChunkOffset = attachmentChunkOffset
+        self.attachmentChunkData = attachmentChunkData
+        self.presencePetPackageID = presencePetPackageID
+        self.presencePetContentHash = presencePetContentHash
+        self.presencePetFileName = presencePetFileName
+        self.presencePetOffset = presencePetOffset
+        self.presencePetLength = presencePetLength
     }
 
     var clientMessageID: String {
@@ -248,6 +375,13 @@ struct CompanionBridgeResponse: Codable, Equatable, Sendable {
     var goal: CompanionBridgeGoal?
     var accountProfileID: UUID?
     var accountProfileLabel: String?
+    var features: [CompanionBridgeFeature]?
+    var subscriptionID: UUID?
+    var selectedDesktopPetID: String?
+    var presencePetCatalog: [CompanionPresencePetCatalogEntry]?
+    var presencePetManifest: CompanionPresencePetManifest?
+    var presencePetChunk: CompanionPresencePetChunk?
+    var attachmentUploadProgress: CompanionAttachmentUploadProgress?
 
     static func success(
         for request: CompanionBridgeRequest,
@@ -271,7 +405,14 @@ struct CompanionBridgeResponse: Codable, Equatable, Sendable {
         usageSnapshot: CompanionBridgeUsageSnapshot? = nil,
         goal: CompanionBridgeGoal? = nil,
         accountProfileID: UUID? = nil,
-        accountProfileLabel: String? = nil
+        accountProfileLabel: String? = nil,
+        features: [CompanionBridgeFeature]? = nil,
+        subscriptionID: UUID? = nil,
+        selectedDesktopPetID: String? = nil,
+        presencePetCatalog: [CompanionPresencePetCatalogEntry]? = nil,
+        presencePetManifest: CompanionPresencePetManifest? = nil,
+        presencePetChunk: CompanionPresencePetChunk? = nil,
+        attachmentUploadProgress: CompanionAttachmentUploadProgress? = nil
     ) -> CompanionBridgeResponse {
         CompanionBridgeResponse(
             id: request.id,
@@ -297,7 +438,14 @@ struct CompanionBridgeResponse: Codable, Equatable, Sendable {
             usageSnapshot: usageSnapshot,
             goal: goal,
             accountProfileID: accountProfileID,
-            accountProfileLabel: accountProfileLabel
+            accountProfileLabel: accountProfileLabel,
+            features: features,
+            subscriptionID: subscriptionID,
+            selectedDesktopPetID: selectedDesktopPetID,
+            presencePetCatalog: presencePetCatalog,
+            presencePetManifest: presencePetManifest,
+            presencePetChunk: presencePetChunk,
+            attachmentUploadProgress: attachmentUploadProgress
         )
     }
 

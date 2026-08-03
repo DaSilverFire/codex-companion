@@ -73,16 +73,55 @@ Migration is copy-first:
 
 The old package remains the rollback source.
 
+## Normal Pet To Companion Package
+
+`prepare-conversion` derives its columns and standard frame counts from a normal Codex package with `192x208` cells and at least rows 0-8. The generated Companion target uses:
+
+- source rows 0-8 unchanged for standard Codex motion;
+- row 9 for `goal-complete`;
+- row 10 for `thinking`;
+- row 11 for `talking`;
+- the source atlas as `look-spritesheet.webp` when native directional-look rows 9-10 exist.
+
+`package-companion` requires a current hash-bound semantic review, verifies that source manifest and spritesheet hashes still match preparation, builds through a temporary sibling directory, and refuses to replace an existing path. Packaging does not install or mutate either application.
+
+## Compact Mobile Presence Contract
+
+A mobile presence package is authored separately from the desktop atlas. It is not a resized desktop row and never changes desktop render identity, frame counts, timing, or selection. The package contains only `idle`, `thinking`, and `talking` in distinct rows.
+
+The default mobile semantic profile is `mobile-portrait-medallion`. It is a direct close-up for the 48-point circular presentation: one recognizable subject using a reference-appropriate head, upper-body, face, or equivalent focal region. The frame review requires a coherent compact crop, correct source-specific anatomy and identity details, no unexpected body parts or components, stable portrait scale, and a consistent bottom-center anchor. Desktop rows keep the source pet's complete full-body anatomy.
+
+The prepared request declares variable frame counts per state, one fixed cell size, state-specific positive frame durations, one poster frame per state, and atlas columns equal to the largest state count. Limits are:
+
+- 1-32 frames per state;
+- cell width and height no larger than 256 pixels;
+- atlas width and height no larger than 8192 pixels;
+- exactly one row each for idle, thinking, and talking;
+- total packaged `manifest.json`, `atlas.png`, and `thumbnail.png` no larger than 8 MiB.
+
+`package-mobile-presence` requires the same current frame-hash and request-hash semantic review as desktop candidates. It writes to a temporary sibling, validates exact file SHA-256 values, byte counts, lossless RGBA PNG decoding, alpha transparency, geometry, row bounds, duration counts, and a canonical manifest content hash, then atomically renames the sibling. It never replaces an existing output.
+
+```text
+mobile-presence-package/
+  manifest.json
+  atlas.png
+  thumbnail.png
+```
+
+The content hash is SHA-256 over canonical JSON with sorted keys and compact separators after removing `contentHash` itself. File records cover `atlas.png` and `thumbnail.png`; the manifest is not self-hashed as a file record.
+
 ## Thinking Choreography
 
 Scale the beats to the declared frame count rather than assuming 16 frames:
 
 - attentive neutral settle;
-- small cat-like head tilt and ear turn;
-- natural blink and restrained tail-tip movement;
+- small identity-appropriate pose or focus change without repeatedly sweeping the subject from side to side;
+- natural blink when applicable and restrained secondary movement for full-body rows, or subtle expression and focused movement for the mobile portrait;
 - return to the starting pose without a loop pop.
 
-Use pose and expression only. No thought bubbles, dots, punctuation, icons, papers, screens, or props.
+Desktop and atlas-authored motion use pose and expression only. Do not bake thought bubbles, dots, punctuation, icons, papers, screens, or props into a pet frame.
+
+When the user requests a Lumo-like thinking cue for the compact mobile presentation, Companion may render a separate thought bubble outside the clipped medallion. That effect is presentation-owned rather than atlas-owned: it is visible only for `thinking`, forms and settles with a restrained spring, holds as a readable bubble, dissolves before the next loop, becomes static under Reduced Motion, and disappears as soon as the state changes. It must not reserve a permanent text column or overlap the response.
 
 ## Talking Choreography
 
@@ -93,22 +132,20 @@ Scale the beats to the declared frame count:
 - optional natural blink while speech motion continues;
 - close the mouth and return to the starting pose.
 
-Keep the body planted. No speech bubbles, sound marks, punctuation, text, tongue, or props. Shadow's nose remains black.
+Keep the body planted. No speech bubbles, sound marks, punctuation, text, or new props. Preserve every identity-defining facial or focal detail from the references.
 
-## Shadow Identity And Anatomy
+## Identity And Anatomy
 
-Every frame requires:
+Every frame requires one recognizable source character. Full-body desktop frames preserve the correct native number and arrangement of limbs and components with no extra, duplicated, merged, hidden-as-one, malformed, or cut-off anatomy. Mobile portrait-medallion frames use a reference-appropriate focal crop with no invented or detached anatomy and no second character.
 
-- one compact black cat;
-- exactly four total cat legs, all anatomically distinct;
-- no extra, duplicated, merged, hidden-as-one, malformed, or cut-off limbs;
-- stable head, ears, muzzle, tail, proportions, outline weight, and charcoal palette;
-- black nose in the same facial position;
-- golden eyes whenever open;
+All framings also require:
+
+- stable silhouette, proportions, palette, markings, outline weight, face or focal details, and reference-approved accessories;
+- identity-defining feature colors and placement whenever visible;
 - complete silhouette inside the cell;
 - no detached component or foreign object.
 
-Blinking may hide the irises temporarily. It may not recolor or relocate them. Talking mouth shapes may change only the mouth region.
+Blinking or pose changes may hide a feature temporarily. They may not recolor, relocate, remove, or duplicate identity-defining details. Talking motion may change only the intended communication region or reference-appropriate cue.
 
 ## Contamination Gate
 
@@ -117,27 +154,36 @@ Reject any visible:
 - magenta, cyan key color, or colored fringe;
 - opaque/checkerboard background;
 - label, frame number, text, logo, watermark, guide line, or border;
-- speech/thought bubble, punctuation, UI, scenery, or floor;
+- speech/thought bubble inside an atlas frame, punctuation, UI, scenery, or floor; a separately rendered mobile thinking effect outside the medallion is reviewed with the live presentation rather than this atlas contamination gate;
 - shadow, glow, blur, aura, dust, motion line, or detached effect;
 - neighboring-slot fragment or edge contact.
 
 ## Semantic Review Schema
 
-The review template binds each decision to a frame SHA-256. Required fields:
+The review template binds each decision to a frame SHA-256. Full-body desktop reviews require:
 
 | Field | Required value |
 | --- | --- |
-| `legCount` | `4` |
-| `legsSeparated` | `true` |
+| `anatomyCorrect` | `true` |
 | `limbsComplete` | `true` |
-| `blackNose` | `true` |
-| `goldenEyes` | `true` |
+| `identityDetailsPreserved` | `true` |
 | `noLabels` | `true` |
 | `noBackground` | `true` |
 | `identityConsistent` | `true` |
 | `anchorScaleConsistent` | `true` |
 | `noExtraObjects` | `true` |
 | `approved` | `true` |
+
+Mobile `mobile-portrait-medallion` reviews use:
+
+| Field | Required value |
+| --- | --- |
+| `cropCompositionCorrect` | `true` |
+| `anatomyCorrect` | `true` |
+| `identityDetailsPreserved` | `true` |
+| `noUnexpectedBodyParts` | `true` |
+
+They retain the shared contamination, identity, anchor, object, and approval fields above.
 
 Recreate and repeat review after any frame changes. A stale hash is a validation failure.
 
@@ -162,3 +208,13 @@ run/
 ```
 
 These are staged candidates, not an installed Companion pet package.
+
+A successful `package-companion` run additionally creates:
+
+```text
+new-pet-package/
+  pet.json
+  spritesheet.webp
+  look-spritesheet.webp  # only when the source has native look rows
+  provenance.json
+```

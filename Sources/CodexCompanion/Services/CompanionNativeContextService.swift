@@ -59,8 +59,11 @@ struct CompanionReminderItem: Equatable, Sendable {
 
 enum CompanionPersonalContextError: LocalizedError, Equatable {
     case calendarAccessDenied
+    case calendarAuthorizationRequired
     case remindersAccessDenied
+    case remindersAuthorizationRequired
     case locationAccessDenied
+    case locationAuthorizationRequired
     case locationServicesDisabled
     case locationUnavailable
     case locationTimedOut
@@ -69,10 +72,16 @@ enum CompanionPersonalContextError: LocalizedError, Equatable {
         switch self {
         case .calendarAccessDenied:
             return "Calendar access is off for Codex Companion. Enable it in System Settings > Privacy & Security > Calendars."
+        case .calendarAuthorizationRequired:
+            return "Calendar access has not been granted on this Mac. Open Codex Companion on the Mac and allow Calendar access before using it from mobile."
         case .remindersAccessDenied:
             return "Reminders access is off for Codex Companion. Enable it in System Settings > Privacy & Security > Reminders."
+        case .remindersAuthorizationRequired:
+            return "Reminders access has not been granted on this Mac. Open Codex Companion on the Mac and allow Reminders access before using it from mobile."
         case .locationAccessDenied:
             return "Location access is off for Codex Companion. Enable it in System Settings > Privacy & Security > Location Services."
+        case .locationAuthorizationRequired:
+            return "Location access has not been granted on this Mac. Open Codex Companion on the Mac and allow Location access before using it from mobile."
         case .locationServicesDisabled:
             return "Location Services are disabled on this Mac."
         case .locationUnavailable:
@@ -178,8 +187,12 @@ enum CompanionPersonalContextFormatter {
 
 #if canImport(CoreLocation)
 struct CompanionLocationService: Sendable {
-    func currentLocation() async throws -> CompanionLocationSnapshot {
-        try await CompanionLocationAuthorization.ensureAuthorized()
+    func currentLocation(
+        allowsSystemAuthorizationPrompt: Bool = true
+    ) async throws -> CompanionLocationSnapshot {
+        try await CompanionLocationAuthorization.ensureAuthorized(
+            allowsSystemAuthorizationPrompt: allowsSystemAuthorizationPrompt
+        )
         return try await withThrowingTaskGroup(of: CompanionLocationSnapshot.self) { group in
             group.addTask {
                 for try await update in CLLocationUpdate.liveUpdates() {
@@ -209,13 +222,18 @@ struct CompanionLocationService: Sendable {
 
 @MainActor
 private enum CompanionLocationAuthorization {
-    static func ensureAuthorized() async throws {
+    static func ensureAuthorized(
+        allowsSystemAuthorizationPrompt: Bool
+    ) async throws {
         guard CLLocationManager.locationServicesEnabled() else {
             throw CompanionPersonalContextError.locationServicesDisabled
         }
 
         let manager = CLLocationManager()
         if manager.authorizationStatus == .notDetermined {
+            guard allowsSystemAuthorizationPrompt else {
+                throw CompanionPersonalContextError.locationAuthorizationRequired
+            }
             manager.requestWhenInUseAuthorization()
             for _ in 0..<120 where manager.authorizationStatus == .notDetermined {
                 try await Task.sleep(nanoseconds: 250_000_000)
@@ -246,8 +264,14 @@ actor CompanionEventKitService {
         self.store = store
     }
 
-    func upcomingEvents(hoursAhead: Int, maximumItems: Int) async throws -> [CompanionCalendarEvent] {
-        try await ensureCalendarAccess()
+    func upcomingEvents(
+        hoursAhead: Int,
+        maximumItems: Int,
+        allowsSystemAuthorizationPrompt: Bool = true
+    ) async throws -> [CompanionCalendarEvent] {
+        try await ensureCalendarAccess(
+            allowsSystemAuthorizationPrompt: allowsSystemAuthorizationPrompt
+        )
         let start = Date()
         let hours = min(max(hoursAhead, 1), 24 * 14)
         let end = Calendar.current.date(byAdding: .hour, value: hours, to: start) ?? start.addingTimeInterval(Double(hours) * 3_600)
@@ -268,8 +292,13 @@ actor CompanionEventKitService {
             }
     }
 
-    func incompleteReminders(maximumItems: Int) async throws -> [CompanionReminderItem] {
-        try await ensureRemindersAccess()
+    func incompleteReminders(
+        maximumItems: Int,
+        allowsSystemAuthorizationPrompt: Bool = true
+    ) async throws -> [CompanionReminderItem] {
+        try await ensureRemindersAccess(
+            allowsSystemAuthorizationPrompt: allowsSystemAuthorizationPrompt
+        )
         let predicate = store.predicateForIncompleteReminders(
             withDueDateStarting: nil,
             ending: nil,
@@ -303,11 +332,16 @@ actor CompanionEventKitService {
             }
     }
 
-    private func ensureCalendarAccess() async throws {
+    private func ensureCalendarAccess(
+        allowsSystemAuthorizationPrompt: Bool
+    ) async throws {
         switch EKEventStore.authorizationStatus(for: .event) {
         case .fullAccess, .authorized:
             return
         case .notDetermined:
+            guard allowsSystemAuthorizationPrompt else {
+                throw CompanionPersonalContextError.calendarAuthorizationRequired
+            }
             guard try await store.requestFullAccessToEvents() else {
                 throw CompanionPersonalContextError.calendarAccessDenied
             }
@@ -318,11 +352,16 @@ actor CompanionEventKitService {
         }
     }
 
-    private func ensureRemindersAccess() async throws {
+    private func ensureRemindersAccess(
+        allowsSystemAuthorizationPrompt: Bool
+    ) async throws {
         switch EKEventStore.authorizationStatus(for: .reminder) {
         case .fullAccess, .authorized:
             return
         case .notDetermined:
+            guard allowsSystemAuthorizationPrompt else {
+                throw CompanionPersonalContextError.remindersAuthorizationRequired
+            }
             guard try await store.requestFullAccessToReminders() else {
                 throw CompanionPersonalContextError.remindersAccessDenied
             }

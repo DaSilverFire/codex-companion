@@ -49,6 +49,31 @@ struct OnDeviceToolTests {
     }
 
     @Test
+    func attachmentContextReadsAStreamedDocumentFromItsStagedFile() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("on-device-streamed-attachment-\(UUID().uuidString)")
+        let fileURL = directory.appendingPathComponent("notes.txt")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("Shadow should stay cat-like.".utf8).write(to: fileURL)
+        let attachment = CompanionBridgeAttachment(
+            kind: .file,
+            filename: "notes.txt",
+            mimeType: "text/plain",
+            data: Data(),
+            byteCount: 2_147_483_648,
+            localFileURL: fileURL
+        )
+
+        let context = try OnDeviceChatAttachmentContext.prepare(
+            prompt: "Summarize this file.",
+            attachments: [attachment]
+        )
+
+        #expect(context.prompt.contains("Shadow should stay cat-like."))
+    }
+
+    @Test
     func attachmentOnlyImageGetsAUsefulPrompt() throws {
         let attachment = CompanionBridgeAttachment(
             kind: .image,

@@ -126,6 +126,7 @@ final class CodexProcessStore: ObservableObject {
     private var unresolvedFailures: [String: CodexProcessItem]
     private var handledFailures: [String: HandledFailure]
     private let defaults: UserDefaults
+    private let lineageStore: CodexThreadLineageStore
     private let readGoals: GoalReader
     private let writeGoal: GoalWriter
 
@@ -141,9 +142,11 @@ final class CodexProcessStore: ObservableObject {
                 tokenBudget: tokenBudget
             )
         },
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        lineageStore: CodexThreadLineageStore? = nil
     ) {
         self.defaults = defaults
+        self.lineageStore = lineageStore ?? CodexThreadLineageStore(defaults: defaults)
         self.unresolvedFailures = Self.loadUnresolvedFailures(from: defaults)
         self.handledFailures = Self.loadHandledFailures(from: defaults)
         self.readGoals = readGoals
@@ -231,16 +234,20 @@ final class CodexProcessStore: ObservableObject {
 
     func refreshGoals() {
         guard !isLoadingGoals else { return }
-        let threadIDs = Array(Set(items.compactMap {
-            $0.threadID?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-        })).sorted()
-        guard !threadIDs.isEmpty else { return }
+        let runtimeThreadIDPairs: [(String, String)] = items.compactMap { item in
+            guard let canonicalThreadID = item.threadID?
+                .trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty else { return nil }
+            return (canonicalThreadID, lineageStore.activeThreadID(for: canonicalThreadID))
+        }
+        let runtimeThreadIDsByCanonicalID = Dictionary(uniqueKeysWithValues: runtimeThreadIDPairs)
+        let runtimeThreadIDs = Array(Set(runtimeThreadIDsByCanonicalID.values)).sorted()
+        guard !runtimeThreadIDs.isEmpty else { return }
 
         isLoadingGoals = true
         let startedAtRevision = goalRevision
         let readGoals = self.readGoals
         Task.detached(priority: .utility) {
-            let result = Result { try readGoals(threadIDs) }
+            let result = Result { try readGoals(runtimeThreadIDs) }
             await MainActor.run {
                 guard Self.shouldApplyGoalRefresh(
                     startedAtRevision: startedAtRevision,
@@ -254,11 +261,13 @@ final class CodexProcessStore: ObservableObject {
                     self.items = self.items.map { item in
                         guard
                             let threadID = item.threadID,
-                            goals.keys.contains(threadID)
+                            let runtimeThreadID = runtimeThreadIDsByCanonicalID[threadID],
+                            goals.keys.contains(runtimeThreadID)
                         else {
                             return item
                         }
-                        if let goal = goals[threadID] ?? nil {
+                        if var goal = goals[runtimeThreadID] ?? nil {
+                            goal.threadID = threadID
                             return Self.applying(goal: goal, to: item)
                         }
                         return Self.clearingGoal(from: item)
@@ -308,17 +317,21 @@ final class CodexProcessStore: ObservableObject {
         tokenBudget: Int?
     ) async throws -> CodexGoalSnapshot {
         let writeGoal = self.writeGoal
+        let canonicalThreadID = lineageStore.canonicalThreadID(for: threadID)
+        let runtimeThreadID = lineageStore.activeThreadID(for: threadID)
         let goal = try await Task.detached(priority: .userInitiated) {
-            try writeGoal(threadID, objective, status, tokenBudget)
+            try writeGoal(runtimeThreadID, objective, status, tokenBudget)
         }.value
+        var canonicalGoal = goal
+        canonicalGoal.threadID = canonicalThreadID
 
         goalRevision += 1
         items = items.map { item in
-            guard item.threadID == goal.threadID else { return item }
-            return Self.applying(goal: goal, to: item)
+            guard item.threadID == canonicalThreadID else { return item }
+            return Self.applying(goal: canonicalGoal, to: item)
         }
         lastGoalRefreshFinishedAt = Date()
-        return goal
+        return canonicalGoal
     }
 
     nonisolated static func shouldApplyGoalRefresh(
@@ -413,10 +426,18 @@ final class CodexProcessStore: ObservableObject {
 
     nonisolated private static func loadItems() -> Result<[CodexProcessItem], Error> {
         let runtimeStatuses = (try? CodexSharedThreadRuntimeReader().read()) ?? [:]
+        let lineages = CodexThreadLineageStore().lineages()
+        let lineageThreadIDs = Set(lineages.flatMap(\.physicalThreadIDs))
         var output = recentJobItems()
-        output.append(contentsOf: applyingRuntimeStatuses(
+        let physicalThreadItems = applyingRuntimeStatuses(
             runtimeStatuses,
-            to: recentThreadItems(runtimeThreadIDs: Set(runtimeStatuses.keys))
+            to: recentThreadItems(
+                runtimeThreadIDs: Set(runtimeStatuses.keys).union(lineageThreadIDs)
+            )
+        )
+        output.append(contentsOf: collapsingThreadLineages(
+            physicalThreadItems,
+            lineages: lineages
         ))
         output = sidebarOrderedItems(output)
 
@@ -456,6 +477,44 @@ final class CodexProcessStore: ObservableObject {
             var updated = item
             updated.runtimeStatus = runtimeStatus
             return applyingRuntimePresentation(to: updated)
+        }
+    }
+
+    nonisolated static func collapsingThreadLineages(
+        _ items: [CodexProcessItem],
+        lineages: [CodexThreadLineage]
+    ) -> [CodexProcessItem] {
+        let lineageByPhysicalThreadID = lineages.reduce(into: [String: CodexThreadLineage]()) {
+            result, lineage in
+            for threadID in lineage.physicalThreadIDs {
+                result[threadID] = lineage
+            }
+        }
+        let grouped = Dictionary(grouping: items) { item -> String in
+            guard let threadID = item.threadID,
+                  let lineage = lineageByPhysicalThreadID[threadID]
+            else { return item.threadID ?? item.id }
+            return lineage.canonicalThreadID
+        }
+
+        return grouped.values.compactMap { lineageItems in
+            guard let first = lineageItems.first else { return nil }
+            guard let firstThreadID = first.threadID,
+                  let lineage = lineageByPhysicalThreadID[firstThreadID]
+            else { return first }
+            let activeItem = lineageItems.first { $0.threadID == lineage.activeThreadID }
+                ?? lineageItems.max {
+                    ($0.updatedAt ?? .distantPast) < ($1.updatedAt ?? .distantPast)
+                }!
+            let canonicalItem = lineageItems.first {
+                $0.threadID == lineage.canonicalThreadID
+            } ?? activeItem
+            var merged = activeItem
+            merged.id = "thread-\(lineage.canonicalThreadID)"
+            merged.threadID = lineage.canonicalThreadID
+            merged.title = canonicalItem.title
+            merged.cwd = canonicalItem.cwd
+            return merged
         }
     }
 
@@ -815,7 +874,7 @@ final class CodexProcessStore: ObservableObject {
                )
                and updated_at >= strftime('%s', 'now') - \(Int(Self.completedProcessDisplayWindow)))
         order by updated_at desc
-        limit 50;
+        limit 200;
         """
 
         return sqliteRows(query: query).compactMap { columns in
@@ -887,7 +946,7 @@ final class CodexProcessStore: ObservableObject {
              \(runtimeClause)
           )
         order by max(t.updated_at, coalesce(g.updated_at_ms, 0) / 1000) desc
-        limit 50;
+        limit 200;
         """
 
         return sqliteRows(query: query).compactMap { columns in

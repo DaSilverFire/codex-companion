@@ -54,7 +54,7 @@ final class CompanionAppModel: ObservableObject {
     let petStore = PetStore()
     let historyStore = RouteHistoryStore()
     let rateLimitStore = CodexRateLimitStore()
-    let processStore = CodexProcessStore()
+    let processStore: CodexProcessStore
 
     private let petReactionCoordinator: PetReactionCoordinator
     private let petVisibilityPreference: PetVisibilityPreference
@@ -90,6 +90,7 @@ final class CompanionAppModel: ObservableObject {
     @Published var chatGPTMenuResponse: ChatGPTMenuResponse?
     @Published var isChatGPTResponding = false
     @Published var isCodexSending = false
+    @Published private(set) var retryingProcessID: String?
     @Published private(set) var approvingThreadID: String?
     @Published private(set) var isSwitchingAccountForProcessID: String?
     @Published private(set) var accountHandoffError: String?
@@ -157,11 +158,6 @@ final class CompanionAppModel: ObservableObject {
             UserDefaults.standard.set(animationSpeedScale, forKey: Self.animationSpeedKey)
         }
     }
-    @Published var useRiggedShadowRenderer: Bool {
-        didSet {
-            UserDefaults.standard.set(useRiggedShadowRenderer, forKey: Self.riggedShadowRendererKey)
-        }
-    }
     @Published var selectedChatGPTModel: ChatGPTModel {
         didSet {
             UserDefaults.standard.set(selectedChatGPTModel.rawValue, forKey: Self.chatGPTModelKey)
@@ -214,6 +210,7 @@ final class CompanionAppModel: ObservableObject {
         petReactionCoordinator: PetReactionCoordinator = PetReactionCoordinator(),
         petVisibilityPreference: PetVisibilityPreference = PetVisibilityPreference(),
         interactionPreferences: CompanionInteractionPreferences = CompanionInteractionPreferences(),
+        processStore: CodexProcessStore? = nil,
         onDeviceChatService: any OnDeviceChatServing = OnDeviceChatServiceFactory.make(),
         codexPromptSubmitter: @escaping CodexPromptSubmitter = { prompt, threadID, cwd, action, expectedTurnID, clientMessageID, onQueued in
             await CodexAppServerSender().submit(
@@ -285,6 +282,7 @@ final class CompanionAppModel: ObservableObject {
         self.petReactionCoordinator = petReactionCoordinator
         self.petVisibilityPreference = petVisibilityPreference
         self.interactionPreferences = interactionPreferences
+        self.processStore = processStore ?? CodexProcessStore()
         self.onDeviceChatService = onDeviceChatService
         self.codexPromptSubmitter = codexPromptSubmitter
         self.codexApprovalSubmitter = codexApprovalSubmitter
@@ -317,8 +315,6 @@ final class CompanionAppModel: ObservableObject {
         } else {
             animationSpeedScale = savedSpeed > 0 ? savedSpeed : 1.15
         }
-        useRiggedShadowRenderer = false
-        UserDefaults.standard.set(false, forKey: Self.riggedShadowRendererKey)
         let savedChatGPTModel = UserDefaults.standard.string(forKey: Self.chatGPTModelKey)
         let restoredChatGPTModel = ChatGPTModel.restoringPersistedSelection(savedChatGPTModel)
         selectedChatGPTModel = restoredChatGPTModel
@@ -361,11 +357,11 @@ final class CompanionAppModel: ObservableObject {
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
-        processStore.objectWillChange
+        self.processStore.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
-        processStore.$items
+        self.processStore.$items
             .sink { [weak self] items in
                 Task { @MainActor in
                     self?.reconcileProcessTarget(with: items)
@@ -378,7 +374,7 @@ final class CompanionAppModel: ObservableObject {
         if startsBackgroundServices {
             CodexPendingApprovalBroker.shared.start()
             rateLimitStore.refresh()
-            processStore.refresh()
+            self.processStore.refresh()
             startPassiveProcessRefreshTimer()
             Task(priority: .utility) {
                 await petReactionCoordinator.prewarm()
@@ -506,7 +502,7 @@ final class CompanionAppModel: ObservableObject {
                 )
                 guard isSwitchingAccountForProcessID == item.id else { return }
                 isSwitchingAccountForProcessID = nil
-                status = "\(item.title) continued with \(profile.label) as a new task."
+                status = "\(item.title) continued with \(profile.label)."
                 accountHandoffFeedback = CodexAccountHandoffFeedback(
                     processID: item.id,
                     message: status,
@@ -514,7 +510,8 @@ final class CompanionAppModel: ObservableObject {
                 )
                 CodexSendLog.append(
                     "manual account handoff source_thread=\(threadID) "
-                        + "destination_thread=\(handoff.threadID) "
+                        + "canonical_thread=\(handoff.threadID) "
+                        + "destination_thread=\(handoff.runtimeThreadID) "
                         + "profile=\(profile.id.uuidString)"
                 )
                 processStore.refresh()
@@ -1964,6 +1961,66 @@ final class CompanionAppModel: ObservableObject {
         startProcessRefreshTimer()
     }
 
+    func retry(_ item: CodexProcessItem) {
+        guard item.status == .failed, item.canTargetCodexThread else {
+            status = "This failed process is not available to retry."
+            return
+        }
+        switch item.runtimeStatus {
+        case .active, .waitingOnApproval, .waitingOnUserInput:
+            status = "Wait for \(item.title) to stop before retrying it."
+            return
+        case .idle, .notLoaded, .systemError, nil:
+            break
+        }
+        guard retryingProcessID == nil, !isCodexSending else {
+            status = "A Codex message is already being sent."
+            return
+        }
+        guard var target = CodexProcessTarget(item: item, action: .reply) else {
+            status = "No retry target for \(item.title)."
+            return
+        }
+
+        // Failed rows can retain the last completed turn ID. A retry is a new
+        // reply and must never be interpreted as a steer into that stale turn.
+        target.activeTurnID = nil
+        retryingProcessID = item.id
+        routeMode = .codex
+        isQuickBarOpen = true
+        isCodexProcessTrayVisible = true
+        isChatGPTModelPickerExpanded = false
+        chatGPTMenuResponse = nil
+        selectedState = .waiting
+        codexComposerFeedback = nil
+        status = "Retrying \(item.title)..."
+
+        Task { @MainActor in
+            do {
+                if item.goalStatus?.canResume == true,
+                   let threadID = item.threadID
+                {
+                    _ = try await processStore.setGoal(
+                        threadID: threadID,
+                        objective: nil,
+                        status: .active,
+                        tokenBudget: nil
+                    )
+                }
+
+                activeProcessTarget = target
+                prompt = "continue"
+                retryingProcessID = nil
+                sendCodexPromptAsync("continue", target: target)
+            } catch {
+                retryingProcessID = nil
+                selectedState = .failed
+                status = "Could not resume the goal for \(item.title). \(error.localizedDescription)"
+                codexComposerFeedback = CodexComposerFeedback(text: status, isError: true)
+            }
+        }
+    }
+
     func steer(_ item: CodexProcessItem) {
         guard let target = CodexProcessTarget(item: item, action: .steer) else {
             CodexSendLog.append("companion target failed action=steer title=\(item.title) thread=\(item.threadID ?? "nil")")
@@ -2707,7 +2764,6 @@ final class CompanionAppModel: ObservableObject {
     private static let animationSpeedKey = "animationSpeedScale"
     private static let animationSpeedTimingVersionKey = "animationSpeedTimingVersion"
     private static let currentAnimationSpeedTimingVersion = 2
-    private static let riggedShadowRendererKey = "useRiggedShadowRenderer"
     private static let chatGPTModelKey = "selectedChatGPTModel"
     private static let chatGPTDeliveryModeKey = "selectedChatGPTDeliveryMode"
     private static let lumoModelKey = "selectedLumoModel"

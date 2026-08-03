@@ -19,8 +19,40 @@ DEFAULT_UPDATE_MANIFEST_URL="https://github.com/DaSilverFire/codex-companion/rel
 DEFAULT_UPDATE_PUBLIC_KEY="/b26MOV9HlKeifsp8TCIb3tPDJW5SGBf7o/CE+RooVg="
 UPDATE_MANIFEST_URL="${CODEX_COMPANION_UPDATE_MANIFEST_URL:-$DEFAULT_UPDATE_MANIFEST_URL}"
 UPDATE_PUBLIC_KEY="${CODEX_COMPANION_UPDATE_PUBLIC_KEY:-$DEFAULT_UPDATE_PUBLIC_KEY}"
-RELAY_URL="${CODEX_COMPANION_RELAY_URL:-}"
-MOBILE_BETA_AUTHORIZED="${CODEX_COMPANION_MOBILE_BETA_AUTHORIZED:-0}"
+DEFAULT_INSTALLED_APP_BUNDLE="/Applications/$BUNDLE_NAME.app"
+INSTALLED_APP_BUNDLE="${CODEX_COMPANION_INSTALLED_APP_BUNDLE:-$DEFAULT_INSTALLED_APP_BUNDLE}"
+INSTALLED_INFO_PLIST="$INSTALLED_APP_BUNDLE/Contents/Info.plist"
+
+read_installed_plist_value() {
+  local key="$1"
+  [[ -f "$INSTALLED_INFO_PLIST" ]] || return 1
+  /usr/bin/plutil -extract "$key" raw -o - "$INSTALLED_INFO_PLIST" 2>/dev/null
+}
+
+if [[ "${CODEX_COMPANION_RELAY_URL+set}" == "set" ]]; then
+  RELAY_URL="$CODEX_COMPANION_RELAY_URL"
+else
+  RELAY_URL="$(read_installed_plist_value CodexCompanionRelayURL || true)"
+fi
+
+if [[ "${CODEX_COMPANION_MOBILE_BETA_AUTHORIZED+set}" == "set" ]]; then
+  MOBILE_BETA_AUTHORIZED="$CODEX_COMPANION_MOBILE_BETA_AUTHORIZED"
+else
+  INSTALLED_MOBILE_BETA_AUTHORIZED="$(
+    read_installed_plist_value CodexCompanionMobileBetaAuthorized || true
+  )"
+  case "$INSTALLED_MOBILE_BETA_AUTHORIZED" in
+    true|1) MOBILE_BETA_AUTHORIZED=1 ;;
+    *) MOBILE_BETA_AUTHORIZED=0 ;;
+  esac
+fi
+
+if [[ "${CODEX_COMPANION_BUILD_NUMBER+set}" == "set" ]]; then
+  BUILD_NUMBER="$CODEX_COMPANION_BUILD_NUMBER"
+else
+  BUILD_NUMBER="$(read_installed_plist_value CFBundleVersion || true)"
+  BUILD_NUMBER="${BUILD_NUMBER:-1}"
+fi
 MOBILE_BETA_PLIST_BOOL=false
 RELAUNCH_LABEL="com.silverfire.codexcompanion.relauncher"
 USER_DOMAIN="gui/$(id -u)"
@@ -32,11 +64,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION_FILE="$ROOT_DIR/VERSION"
 VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
 DIST_DIR="$ROOT_DIR/dist"
-STAGING_DIR="${TMPDIR:-/tmp}/codex-companion-build"
-SWIFT_BUILD_SCRATCH="${CODEX_COMPANION_BUILD_SCRATCH_PATH:-${TMPDIR:-/tmp}/codex-companion-swift-build}"
+DEV_CACHE_ROOT="${CODEX_COMPANION_DEV_CACHE_ROOT:-$ROOT_DIR/.codex-dev-cache}"
+STAGING_DIR="${CODEX_COMPANION_STAGING_PATH:-$DEV_CACHE_ROOT/staging}"
+SWIFT_BUILD_SCRATCH="${CODEX_COMPANION_BUILD_SCRATCH_PATH:-$DEV_CACHE_ROOT/swift-build}"
 APP_BUNDLE="$STAGING_DIR/$BUNDLE_NAME.app"
 DIST_APP_BUNDLE="$DIST_DIR/$BUNDLE_NAME.app"
-INSTALLED_APP_BUNDLE="/Applications/$BUNDLE_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_BINARY="$APP_MACOS/$APP_NAME"
@@ -116,12 +148,23 @@ if [[ "$MOBILE_BETA_AUTHORIZED" != "0" && "$MOBILE_BETA_AUTHORIZED" != "1" ]]; t
   echo "CODEX_COMPANION_MOBILE_BETA_AUTHORIZED must be 0 or 1" >&2
   exit 2
 fi
+if [[ ! "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+  echo "CODEX_COMPANION_BUILD_NUMBER must be a positive integer" >&2
+  exit 2
+fi
 if [[ -n "$RELAY_URL" && "$RELAY_URL" != wss://* ]]; then
   echo "Codex Companion relay URL must use WSS" >&2
   exit 2
 fi
 if [[ "$MOBILE_BETA_AUTHORIZED" == "1" ]]; then
   MOBILE_BETA_PLIST_BOOL=true
+fi
+
+if [[ "$MODE" == "--print-config" ]]; then
+  printf 'relay_url=%s\n' "$RELAY_URL"
+  printf 'mobile_beta_authorized=%s\n' "$MOBILE_BETA_AUTHORIZED"
+  printf 'build_number=%s\n' "$BUILD_NUMBER"
+  exit 0
 fi
 
 suspend_relaunch_agent
@@ -160,7 +203,7 @@ cat >"$INFO_PLIST" <<PLIST
   <key>CFBundleShortVersionString</key>
   <string>$VERSION</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>$BUILD_NUMBER</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>LSUIElement</key>

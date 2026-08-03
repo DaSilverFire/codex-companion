@@ -213,7 +213,8 @@ struct CodexAutomaticTaskContinuationTests {
                     profile: profile
                 )
                 return CodexThreadAccountHandoffResult(
-                    threadID: "thread-1-fork",
+                    threadID: "thread-1",
+                    runtimeThreadID: "thread-1-fork",
                     rolloutURL: URL(fileURLWithPath: "/tmp/thread-1-fork.jsonl"),
                     profileID: profile.id
                 )
@@ -244,7 +245,7 @@ struct CodexAutomaticTaskContinuationTests {
         let sends = await sendRecorder.invocations
         #expect(sends.count == 1)
         #expect(sends.first?.prompt == "continue")
-        #expect(sends.first?.threadID == "thread-1-fork")
+        #expect(sends.first?.threadID == "thread-1")
         #expect(sends.first?.cwd == "/tmp/project")
         #expect(sends.first?.action == .reply)
         #expect(sends.first?.expectedTurnID == nil)

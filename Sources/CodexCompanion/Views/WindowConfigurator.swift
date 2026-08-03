@@ -152,6 +152,24 @@ enum PetWindowMetrics {
         )
     }
 
+    static func processHoverResizedTrayFrame(
+        currentFrame: NSRect,
+        targetSize: CGSize,
+        visibleFrame: NSRect,
+        margin: CGFloat = 8
+    ) -> NSRect {
+        var origin = currentFrame.origin
+        origin.x = min(
+            max(origin.x, visibleFrame.minX + margin),
+            visibleFrame.maxX - targetSize.width - margin
+        )
+        origin.y = min(
+            max(origin.y, visibleFrame.minY + margin),
+            visibleFrame.maxY - targetSize.height - margin
+        )
+        return NSRect(origin: origin, size: targetSize)
+    }
+
     static func contentSize(isQuickBarOpen: Bool, showProcesses: Bool) -> CGSize {
         return CGSize(
             width: petSize.width,
@@ -254,6 +272,7 @@ enum PetWindowMetrics {
                 showsActions: item.id == expandedProcessID
                     && item.canTargetCodexThread
                     && (item.runtimeStatus == .waitingOnApproval || item.status != .waiting),
+                showsExpandedMessage: item.id == expandedProcessID,
                 inlineComposerHeight: inlineComposerHeight
             )
         } + CGFloat(max(0, visibleItems.count - 1)) * 6 + 2
@@ -369,12 +388,14 @@ enum PetWindowMetrics {
     static func processRowHeight(
         for item: CodexProcessItem,
         showsActions: Bool = false,
+        showsExpandedMessage: Bool = false,
         inlineComposerHeight: CGFloat = 0
     ) -> CGFloat {
         let collapsedHeight: CGFloat = item.goalStatus == nil ? 58 : 72
         let actionsHeight: CGFloat = item.canTargetCodexThread && showsActions ? 29 : 0
+        let expandedMessageHeight: CGFloat = showsExpandedMessage ? 28 : 0
         let composerHeight = inlineComposerHeight > 0 ? inlineComposerHeight + 5 : 0
-        return collapsedHeight + actionsHeight + composerHeight
+        return collapsedHeight + actionsHeight + expandedMessageHeight + composerHeight
     }
 
     private static func estimatedPromptLineCount(for prompt: String) -> Int {
@@ -657,6 +678,28 @@ final class PetTrayProcessRefreshObserver {
     }
 }
 
+@MainActor
+final class PetTrayHoverRefreshObserver {
+    private weak var observedModel: CompanionAppModel?
+    private var cancellable: AnyCancellable?
+
+    func observe(
+        _ model: CompanionAppModel,
+        refresh: @escaping @MainActor () -> Void
+    ) {
+        guard observedModel !== model else { return }
+        observedModel = model
+        cancellable = model.$hoveredProcessID
+            .removeDuplicates()
+            .dropFirst()
+            .sink { _ in
+                DispatchQueue.main.async {
+                    refresh()
+                }
+            }
+    }
+}
+
 enum PetTrayPanelOrderingPolicy {
     static func shouldOrderFront(wasVisible: Bool) -> Bool {
         !wasVisible
@@ -676,6 +719,7 @@ final class PetTrayPanel {
     private var areMenuControlsVisible = true
     private var originAnimationTimer: Timer?
     private let processRefreshObserver = PetTrayProcessRefreshObserver()
+    private let hoverRefreshObserver = PetTrayHoverRefreshObserver()
 
     private init() {}
 
@@ -695,7 +739,12 @@ final class PetTrayPanel {
         return (panel.frame, anchorWindow.frame, visibleFrame)
     }
 
-    func update(anchorWindow: NSWindow, model: CompanionAppModel?, isShown: Bool) {
+    func update(
+        anchorWindow: NSWindow,
+        model: CompanionAppModel?,
+        isShown: Bool,
+        preservesCurrentOrigin: Bool = false
+    ) {
         self.anchorWindow = anchorWindow
         self.model = model
 
@@ -708,6 +757,20 @@ final class PetTrayPanel {
                     self.panel?.isVisible == true
                 else { return }
                 self.update(anchorWindow: anchorWindow, model: model, isShown: true)
+            }
+            hoverRefreshObserver.observe(model) { [weak self] in
+                guard
+                    let self,
+                    let anchorWindow = self.anchorWindow,
+                    let model = self.model,
+                    self.panel?.isVisible == true
+                else { return }
+                self.update(
+                    anchorWindow: anchorWindow,
+                    model: model,
+                    isShown: true,
+                    preservesCurrentOrigin: true
+                )
             }
         }
 
@@ -745,11 +808,23 @@ final class PetTrayPanel {
         panel.contentMinSize = traySize
         panel.contentMaxSize = traySize
 
-        let nextFrame = positionedFrame(
+        var nextFrame = positionedFrame(
             for: anchorWindow,
             size: traySize,
             areMenuControlsVisible: nextMenuControlsVisible
         )
+        if preservesCurrentOrigin,
+           wasVisible,
+           !didMenuControlVisibilityChange,
+           let visibleFrame = panel.screen?.visibleFrame
+               ?? anchorWindow.screen?.visibleFrame
+               ?? NSScreen.main?.visibleFrame {
+            nextFrame = PetWindowMetrics.processHoverResizedTrayFrame(
+                currentFrame: panel.frame,
+                targetSize: traySize,
+                visibleFrame: visibleFrame
+            )
+        }
         if wasVisible {
             panel.alphaValue = 1
             setPanelFrameIfNeeded(
@@ -776,6 +851,7 @@ final class PetTrayPanel {
         areMenuControlsVisible = nextMenuControlsVisible
         clearPanelSurface(panel)
         CodexUsagePanel.shared.reposition()
+        ChatDeliveryPanel.shared.reposition()
     }
 
     func reposition() {
@@ -787,6 +863,7 @@ final class PetTrayPanel {
         )
         setPanelFrameIfNeeded(panel, nextFrame)
         CodexUsagePanel.shared.reposition()
+        ChatDeliveryPanel.shared.reposition()
     }
 
     func setMenuControlsVisible(_ isVisible: Bool) {
@@ -801,11 +878,13 @@ final class PetTrayPanel {
         )
         setPanelFrameIfNeeded(panel, nextFrame, animated: true)
         CodexUsagePanel.shared.reposition()
+        ChatDeliveryPanel.shared.reposition()
     }
 
     private func close() {
         stopOriginAnimation()
         CodexUsagePanel.shared.dismiss()
+        ChatDeliveryPanel.shared.dismiss()
         panel?.orderOut(nil)
         panel?.alphaValue = 1
     }
